@@ -248,7 +248,7 @@ def safe_save(model, path):
 # ====================================================
 # 6. 학습 루프
 # ====================================================
-def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
+def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
     a=int(input())-1
     x=[2.6667,0.2414,2.0,1.5,0.6316,0.01108,1.4286]
     transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
