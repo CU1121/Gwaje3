@@ -397,7 +397,10 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             print('Early stopping triggered')
         if a==0:
             a=int(input())
+            y=int(input())
+            lr*=y
         a-=1
+        print(lr)
     safe_save(model, 'final.pth')
 
 # ====================================================
