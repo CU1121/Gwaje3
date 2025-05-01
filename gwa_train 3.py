@@ -13,6 +13,34 @@ import kornia.color as KC  # for LAB conversion
 # 디바이스 설정
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+def make_laplacian_kernel(k):
+    # k×k 라플라시안 커널: 주변에 -1, 중앙에 k*k - 1
+    lap = -torch.ones((k, k), dtype=torch.float32)
+    lap[k//2, k//2] = k*k - 1
+    return lap
+
+def multi_scale_hf_loss(out, gt):
+    B, C, H, W = out.shape
+    losses = []
+    scales = [3, 5, 7]
+    weights = [1.0, 0.5, 0.25]
+
+    for k, w in zip(scales, weights):
+        # 1) 라플라시안 2D 커널 생성
+        lap2d = make_laplacian_kernel(k).to(out.device)            # (k,k)
+        lap4d = lap2d.expand(C, 1, k, k)                           # (C,1,k,k) for group conv
+
+        # 2) same padding
+        pad = k // 2
+
+        # 3) 그룹 컨볼루션으로 채널별 적용
+        hf_out = F.conv2d(out, lap4d, padding=pad, groups=C)
+        hf_gt  = F.conv2d(gt,  lap4d, padding=pad, groups=C)
+
+        # 4) L1 손실에 스케일 가중치 곱
+        losses.append(w * F.l1_loss(hf_out, hf_gt))
+
+    return sum(losses)
 
 # ====================================================
 # 1. 메타데이터 생성
@@ -268,9 +296,7 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                     l_mse = mse(out, eh) *x[0]
                     l_per = perc(out, eh) * x[1]
                     #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                    l_hf3 = F.mse_loss(laplacian3(out), laplacian3(eh)) * x[3]
-                    l_hf5 = F.mse_loss(laplacian5(out), laplacian5(eh)) * x[3] *0.5
-                    l_hf = l_hf3 + l_hf5
+                    l_hf = multi_scale_hf_loss(out,eh)
                     hsv_out=KC.rgb_to_hsv(out)
                     hsv_gt=KC.rgb_to_hsv(eh)
                     l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
@@ -291,7 +317,7 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                 l_mse = mse(out, eh) *x[0]
                 l_per = perc(out, eh) * x[1]
                 #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                l_hf = F.l1_loss(laplacian(out), laplacian(eh)) * x[3]
+                l_hf = multi_scale_hf_loss(out,eh)
                 hsv_out=KC.rgb_to_hsv(out)
                 hsv_gt=KC.rgb_to_hsv(eh)
                 l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
@@ -334,9 +360,7 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                 l_mse = mse(out, eh) * x[0]
                 l_per = perc(out, eh) * x[1]
                 #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                l_hf3 = F.mse_loss(laplacian3(out), laplacian3(eh)) * x[3]
-                l_hf5 = F.mse_loss(laplacian5(out), laplacian5(eh)) * x[3] *0.5
-                l_hf = l_hf3 + l_hf5
+                l_hf = multi_scale_hf_loss(out,eh)
                 hsv_out=KC.rgb_to_hsv(out)
                 hsv_gt=KC.rgb_to_hsv(eh)
                 l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
