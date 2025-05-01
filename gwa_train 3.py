@@ -398,9 +398,9 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
         if a==0:
             a=int(input())
             y=int(input())
-            optimizer.param_groups[0]['lr']*=y
+            opt.param_groups[0]['lr']*=y
         a-=1
-        print(optimizer.param_groups[0]['lr'])
+        print(opt.param_groups[0]['lr'])
     safe_save(model, 'final.pth')
 
 # ====================================================
