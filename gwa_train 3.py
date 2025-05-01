@@ -265,14 +265,21 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                 with torch.cuda.amp.autocast():
                     residual = model(lo_bc, cs)
                     out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                    l_mse = mse(out, eh)
-                    l_per = perc(out, eh) * 0.1
-                    l_msk = ((out - eh).pow(2) * msk).mean() * 5
-                    l_hf = F.l1_loss(laplacian(out), laplacian(eh)) * 0.1
+                    l_mse = mse(out, eh) *x[0]
+                    l_per = perc(out, eh) * x[1]
+                    #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
+                    l_hf = F.l1_loss(laplacian(out), laplacian(eh)) * x[3]
+                    hsv_out=KC.rgb_to_hsv(out)
+                    hsv_gt=KC.rgb_to_hsv(eh)
+                    l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
                     lab_out = KC.rgb_to_lab(out)
                     lab_eh = KC.rgb_to_lab(eh)
-                    l_lab = F.l1_loss(lab_out[:,1:,:,:], lab_eh[:,1:,:,:]) * 0.2
-                    loss = l_mse + l_per + l_msk + l_hf + l_lab
+                    l_lab = F.l1_loss(lab_out[:,1:,:,:], lab_eh[:,1:,:,:]) * x[5]
+                    loss = l_mse + l_per + l_hf + l_sat +l_lab
+                    tv_h = torch.abs(out[:,:,1:,:] - out[:,:,:-1,:]).mean()
+                    tv_w = torch.abs(out[:,:,:,1:] - out[:,:,:,:-1]).mean()
+                    tv_loss = (tv_h + tv_w) * x[6]   # 0.1은 가중치, 실험하며 조절
+                    loss+=tv_loss
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
