@@ -296,7 +296,7 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                     l_mse = mse(out, eh) *x[0]
                     l_per = perc(out, eh) * x[1]
                     #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                    l_hf = multi_scale_hf_loss(out,eh)
+                    l_hf = F.l1_loss(laplacian(out), laplacian(eh)) *x[3]
                     hsv_out=KC.rgb_to_hsv(out)
                     hsv_gt=KC.rgb_to_hsv(eh)
                     l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
@@ -317,7 +317,7 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                 l_mse = mse(out, eh) *x[0]
                 l_per = perc(out, eh) * x[1]
                 #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                l_hf = multi_scale_hf_loss(out,eh)
+                l_hf = F.l1_loss(laplacian(out), laplacian(eh)) *x[3]
                 hsv_out=KC.rgb_to_hsv(out)
                 hsv_gt=KC.rgb_to_hsv(eh)
                 l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
@@ -360,7 +360,7 @@ def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
                 l_mse = mse(out, eh) * x[0]
                 l_per = perc(out, eh) * x[1]
                 #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                l_hf = multi_scale_hf_loss(out,eh)
+                l_hf = F.l1_loss(laplacian(out), laplacian(eh)) *x[3]
                 hsv_out=KC.rgb_to_hsv(out)
                 hsv_gt=KC.rgb_to_hsv(eh)
                 l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
