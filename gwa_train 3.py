@@ -62,7 +62,7 @@ def analyze_and_generate_metadata(low_dir, enh_dir, save_name="metadata.json"):
             "color_shift": color_diff        # RGB 스케일 차이
         }
         print(v_diff, color_diff)
-        cv2.imwrite(os.path.join(enh_dir, f"mask_{enh_f}.png"), mask)
+        cv2.imwrite(os.path.join(enh_dir, f"mask_{enh_f}"), mask)
 
     with open(os.path.join(enh_dir, save_name), 'w') as f:
         json.dump(metadata, f, indent=4)
@@ -220,10 +220,9 @@ def safe_save(model, path):
 # ====================================================
 # 6. 학습 루프
 # ====================================================
-def train(low_dir, enh_dir, meta_file, epochs=80, bs=12, lr=2e-2):
+def train(low_dir, enh_dir, meta_file, epochs=80, bs=10, lr=2e-2):
     a=int(input())-1
-    #x=[2.6667,0.2414,2.0,30,0.6316,0.01108,1.4286]
-    x=[0,0,0,1,0,0,0]
+    x=[2.6667,0.2414,2.0,30,0.6316,0.01108,1.4286]
     transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
     n_val = int(0.2 * len(ds))
