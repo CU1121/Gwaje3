@@ -10,6 +10,17 @@ from torch import nn, optim
 import torch.nn.functional as F
 import kornia.color as KC  # for LAB conversion
 
+class SimpleEdgeExtractor(nn.Module):
+    def __init__(self, in_ch=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, 16, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 1, 3, padding=1), nn.Sigmoid()
+        )
+    def forward(self, x):
+        return self.net(x)
+
+
 # 디바이스 설정
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -175,6 +186,7 @@ class SEBlock(nn.Module):
     def forward(self, x):
         return x * self.net(x)
 
+
 class UNetConditionalModel(nn.Module):
     def __init__(self, cond_dim=3):
         super().__init__()
@@ -190,20 +202,27 @@ class UNetConditionalModel(nn.Module):
         self.pool = nn.MaxPool2d(2)
         self.bott = block(128,256)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.dec2 = block(256+128,128)
-        self.dec1 = block(128+64,64)
+        self.dec2 = block(256+128+1,128)  # 구조 map 추가
+        self.dec1 = block(128+64+1,64)
         self.final = nn.Conv2d(64,3,1)
 
-    def forward(self, x, cond):
+
+    def forward(self, x, cond, struct_map):
         b = x.size(0)
         cm = self.cond_fc(cond).view(b,1,256,256)
         x = torch.cat([x, cm], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
         bn = self.bott(self.pool(e2))
-        d2 = self.dec2(torch.cat([self.up(bn), e2], dim=1))
-        d1 = self.dec1(torch.cat([self.up(d2), e1], dim=1))
+        
+        # 🔽 구조 map을 dec에 반복해서 사용
+        s_down1 = F.interpolate(struct_map, scale_factor=0.5, mode='bilinear', align_corners=False)
+        s_down2 = F.interpolate(struct_map, scale_factor=1.0, mode='bilinear', align_corners=False)
+
+        d2 = self.dec2(torch.cat([self.up(bn), e2, s_down1], dim=1))
+        d1 = self.dec1(torch.cat([self.up(d2), e1, s_down2], dim=1))
         return self.final(d1)
+
 
 # 고주파 경계 강조용 라플라시안 연산
 def laplacian(x):
@@ -259,6 +278,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
     tr = DataLoader(tr_ds, bs, shuffle=True)
     va = DataLoader(va_ds, bs)
     model = UNetConditionalModel().to(device)
+    structure_model = SimpleEdgeExtractor().to(device)
     opt = optim.Adam(model.parameters(), lr)
     scaler = torch.amp.GradScaler('cuda',enabled=torch.cuda.is_available())
     sched = optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, steps_per_epoch=len(tr), epochs=epochs)
@@ -342,6 +362,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
         lab_loss=0
         t_loss=0
         with torch.no_grad():
+            struct_map = structure_model(lo_bc)
             for lo, eh, cond, _ in va:
                 lo, eh, cond = lo.to(device), eh.to(device), cond.to(device)
                 b = cond[:, :1]
@@ -355,7 +376,9 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 # ④ 색상 이동
                 lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
 
-                residual = model(lo_bc, cs)
+                
+
+                residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
                 l_mse = mse(out, eh) * x[0]
                 l_per = perc(out, eh) * x[1]
@@ -438,6 +461,18 @@ def inference(image_path, brightness, shifts):
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     cv2.destroyAllWindows()
+
+
+    model = UNetConditionalModel(cond_dim=3).to(device)
+    structure_model = SimpleEdgeExtractor().to(device)
+    model.load_state_dict(torch.load("final.pth", map_location=device))
+    model.eval()
+    structure_model.eval()  # 구조 모델도 평가 모드
+    with torch.no_grad():
+        struct_map = structure_model(lo_bc)
+        residual   = model(lo_bc, cs, struct_map)  # 구조 map 포함
+        out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
+
 
     # 2. 입력 텐서 및 조건 벡터 생성 (정규화 포함)
     transform = T.Compose([
