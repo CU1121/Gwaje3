@@ -310,7 +310,8 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
             opt.zero_grad()
             if torch.cuda.is_available():
-                with torch.cuda.amp.autocast():
+                struct_map = structure_model(lo_bc) 
+                with torch.amp.autocast(device_type='cuda'):
                     residual = model(lo_bc, cs, struct_map)
                     out = torch.clamp(lo_bc + residual, 0.0, 1.0)
                     l_mse = mse(out, eh) *x[0]
