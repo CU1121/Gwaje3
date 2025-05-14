@@ -203,8 +203,8 @@ class UNetConditionalModel(nn.Module):
         self.pool = nn.MaxPool2d(2)
         self.bott = block(128,256)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.dec2 = block(256+128+1,128)  # 구조 map 추가
-        self.dec1 = block(128+64+1,64)
+        self.dec2 = block(256+128+2,128)
+        self.dec1 = block(128+64+2,64)
         self.final = nn.Conv2d(64,3,1)
 
 
@@ -270,6 +270,8 @@ def safe_save(model, path):
 # ====================================================
 # 6. 학습 루프 (MSE + Perceptual + LPIPS Loss 추가)
 # ====================================================
+from kornia.filters import Sobel  # Sobel 필터 추가
+
 def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
     transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
@@ -278,8 +280,11 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
     tr_ds, va_ds = random_split(ds, [n_tr, n_val])
     tr = DataLoader(tr_ds, bs, shuffle=True)
     va = DataLoader(va_ds, bs)
+    
     model = UNetConditionalModel().to(device)
     structure_model = SimpleEdgeExtractor().to(device)
+    sobel = Sobel().to(device)
+
     opt = optim.Adam(model.parameters(), lr)
     scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
     sched = optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, steps_per_epoch=len(tr), epochs=epochs)
@@ -287,7 +292,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
     perc = VGGPerceptualLoss()
     mse = nn.MSELoss()
-    lpips_loss = lpips.LPIPS(net='vgg').to(device)  # ✅ LPIPS 초기화
+    lpips_loss = lpips.LPIPS(net='vgg').to(device)
 
     best = float('inf')
     pat = 0
@@ -306,7 +311,12 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
 
             opt.zero_grad()
-            struct_map = structure_model(lo_bc)
+
+            # 구조 맵: Sobel + 학습 기반
+            gray = KC.rgb_to_grayscale(lo_bc)
+            sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
+            learned_map = structure_model(lo_bc)
+            struct_map = torch.cat([sobel_map, learned_map], dim=1)  # [B,2,H,W]
 
             if torch.cuda.is_available():
                 with torch.amp.autocast(device_type='cuda'):
@@ -331,7 +341,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
             total_loss += loss.item()
 
-        # validation
+        # Validation
         model.eval()
         val_loss = 0
         mse_loss = 0
@@ -349,7 +359,11 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 lo_b = KC.hsv_to_rgb(lo_hsv)
                 lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
 
-                struct_map = structure_model(lo_bc)
+                gray = KC.rgb_to_grayscale(lo_bc)
+                sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
+                learned_map = structure_model(lo_bc)
+                struct_map = torch.cat([sobel_map, learned_map], dim=1)
+
                 residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
 
@@ -406,7 +420,8 @@ def draw_sel(event, x, y, flags, param):
 
 def inference(image_path, brightness, shifts):
     global temp_sel, mask_sel, draw_flag
-    # 1. 이미지 로드 및 마우스 영역 선택
+
+    # 1. 이미지 로드 및 사용자 마우스 입력으로 영역 선택
     image = cv2.imread(image_path)
     temp_sel = image.copy()
     mask_sel = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -420,74 +435,63 @@ def inference(image_path, brightness, shifts):
             break
     cv2.destroyAllWindows()
 
-
-    model = UNetConditionalModel(cond_dim=3).to(device)
-    structure_model = SimpleEdgeExtractor().to(device)
-    model.load_state_dict(torch.load("final.pth", map_location=device))
-    model.eval()
-    structure_model.eval()  # 구조 모델도 평가 모드
-    with torch.no_grad():
-        struct_map = structure_model(lo_bc)
-        residual   = model(lo_bc, cs, struct_map)  # 구조 map 포함
-        out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
-
-
-    # 2. 입력 텐서 및 조건 벡터 생성 (정규화 포함)
+    # 2. 입력 이미지 전처리
     transform = T.Compose([
         T.ToPILImage(),
         T.Resize((256,256)),
         T.ToTensor()
     ])
-    input_tensor = transform(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))\
-                   .unsqueeze(0).to(device)
-    # brightness 와 shifts 를 0~1 범위로 정규화
+    input_tensor = transform(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(device)
+
     cond = [brightness/255.0] + [s/255.0 for s in shifts]
     condition_tensor = torch.tensor([cond], dtype=torch.float32).to(device)
 
-    # 3. 마스크 텐서
+    # 마스크 처리
     mask_resized = cv2.resize(mask_sel, (input_tensor.shape[3], input_tensor.shape[2]))
     mask_tensor = (torch.from_numpy(mask_resized.astype(np.float32) / 255.0)
                    .unsqueeze(0).unsqueeze(0).to(device))  # (1,1,H,W)
 
-    # 4. 사전 보정: 밝기 먼저, 그 다음 컬러
-    b  = condition_tensor[:, :1]    # (1,1)
-    cs = condition_tensor[:, 1:]    # (1,3)
-    # ▶ HSV로 변환
-    lo_hsv = KC.rgb_to_hsv(input_tensor)  
+    # 3. 밝기 및 컬러 사전 보정
+    b  = condition_tensor[:, :1]
+    cs = condition_tensor[:, 1:]
 
-    # ▶ V 채널만 mask 영역에 증폭
-    lo_hsv[:,2:3,:,:] = torch.clamp(
-        lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor,
-        0.0, 1.0
-    )
+    lo_hsv = KC.rgb_to_hsv(input_tensor)
+    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor, 0.0, 1.0)
+    lo_b = KC.hsv_to_rgb(lo_hsv)
+    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
 
-    # ▶ HSV → RGB
-    lo_b = KC.hsv_to_rgb(lo_hsv)  
-
-    # ▶ 그 위에 RGB 색상 이동 (잔차 학습 준비)
-    lo_bc = torch.clamp(
-        lo_b + cs.view(-1,3,1,1) * mask_tensor,
-        0.0, 1.0
-    )
-
-    # 5. 모델 로드 및 잔차 예측
+    # 4. 모델 및 구조 맵 준비
     model = UNetConditionalModel(cond_dim=3).to(device)
+    structure_model = SimpleEdgeExtractor().to(device)
+    sobel = Sobel().to(device)
+
     model.load_state_dict(torch.load("final.pth", map_location=device))
     model.eval()
-    with torch.no_grad():
-        residual   = model(lo_bc, cs)                       # 색감·디테일 잔차
-        out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]  # (3,H,W)
+    structure_model.eval()
+    sobel.eval()
 
-    # 6. 텐서를 이미지로 변환 후 마스크 합성
+    with torch.no_grad():
+        # 구조 맵 (Sobel + 학습 기반)
+        gray = KC.rgb_to_grayscale(lo_bc)
+        sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
+        learned_map = structure_model(lo_bc)
+        struct_map = torch.cat([sobel_map, learned_map], dim=1)  # [B,2,H,W]
+
+        residual   = model(lo_bc, cs, struct_map)
+        out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
+
+    # 5. 결과 이미지 생성 및 마스킹 합성
     output_img = (out_tensor.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8)
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
     mask_full  = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
     mask_3ch   = np.stack([mask_full]*3, axis=2)
     result     = np.where(mask_3ch==255, output_bgr, image)
 
+    # 6. 결과 출력
     cv2.imshow("AI 보정 결과", result)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
 
 
 if __name__ == "__main__":
