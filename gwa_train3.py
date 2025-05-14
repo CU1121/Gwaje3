@@ -267,9 +267,10 @@ def safe_save(model, path):
 # ====================================================
 # 6. 학습 루프
 # ====================================================
+# ====================================================
+# 6. 학습 루프 (MSE + Perceptual Loss만 사용)
+# ====================================================
 def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
-    a=int(input())-1
-    x=[2.6667,0.2414,2.0,1.5,0.6316,0.01108,1.4286]
     transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
     n_val = int(0.2 * len(ds))
@@ -280,136 +281,87 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
     model = UNetConditionalModel().to(device)
     structure_model = SimpleEdgeExtractor().to(device)
     opt = optim.Adam(model.parameters(), lr)
-    scaler = torch.amp.GradScaler('cuda',enabled=torch.cuda.is_available())
+    scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
     sched = optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, steps_per_epoch=len(tr), epochs=epochs)
-    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        opt,
-        mode='min',       # validation loss가 줄어들어야 학습률을 유지
-        factor=0.5,       # 학습률을 1/2로 감소
-        patience=6       # val_loss가 3 에포크 개선되지 않으면 감소
-    )
+    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=6)
+
     perc = VGGPerceptualLoss()
     mse = nn.MSELoss()
     best = float('inf')
     pat = 0
+
     for e in range(epochs):
         model.train()
         total_loss = 0
         for lo, eh, cond, msk in tr:
-            b=cond[:, :1]
-            cs=cond[:, 1:]
+            b = cond[:, :1]
+            cs = cond[:, 1:]
             lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
+
             # ① RGB → HSV
             lo_hsv = KC.rgb_to_hsv(lo)
-            # ② V 채널만 보정 (b는 0–1 스케일, HSV V 범위 0–1)
             lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
-            # ③ HSV → RGB
-            lo_b = KC.hsv_to_rgb(lo_hsv)  
-            # ④ 색상 이동
+            lo_b = KC.hsv_to_rgb(lo_hsv)
             lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
 
             opt.zero_grad()
-            struct_map = structure_model(lo_bc) 
+            struct_map = structure_model(lo_bc)
+
             if torch.cuda.is_available():
                 with torch.amp.autocast(device_type='cuda'):
                     residual = model(lo_bc, cs, struct_map)
                     out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                    l_mse = mse(out, eh) *x[0]
-                    l_per = perc(out, eh) * x[1]
-                    #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                    l_hf = F.l1_loss(laplacian(out), laplacian(eh)) *x[3]
-                    hsv_out=KC.rgb_to_hsv(out)
-                    hsv_gt=KC.rgb_to_hsv(eh)
-                    l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
-                    lab_out = KC.rgb_to_lab(out)
-                    lab_eh = KC.rgb_to_lab(eh)
-                    l_lab = F.l1_loss(lab_out[:,1:,:,:], lab_eh[:,1:,:,:]) * x[5]
-                    loss = l_mse + l_per + l_hf + l_sat +l_lab
-                    tv_h = torch.abs(out[:,:,1:,:] - out[:,:,:-1,:]).mean()
-                    tv_w = torch.abs(out[:,:,:,1:] - out[:,:,:,:-1]).mean()
-                    tv_loss = (tv_h + tv_w) * x[6]   # 0.1은 가중치, 실험하며 조절
-                    loss+=tv_loss
+                    l_mse = mse(out, eh)
+                    l_per = perc(out, eh)
+                    loss = l_mse + l_per
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
             else:
-                residual = model(lo_bc, cs)
-                out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                l_mse = mse(out, eh) *x[0]
-                l_per = perc(out, eh) * x[1]
-                #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                l_hf = F.l1_loss(laplacian(out), laplacian(eh)) *x[3]
-                hsv_out=KC.rgb_to_hsv(out)
-                hsv_gt=KC.rgb_to_hsv(eh)
-                l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
-                lab_out = KC.rgb_to_lab(out)
-                lab_eh = KC.rgb_to_lab(eh)
-                l_lab = F.l1_loss(lab_out[:,1:,:,:], lab_eh[:,1:,:,:]) * x[5]
-                loss = l_mse + l_per + l_hf + l_sat +l_lab
-                tv_h = torch.abs(out[:,:,1:,:] - out[:,:,:-1,:]).mean()
-                tv_w = torch.abs(out[:,:,:,1:] - out[:,:,:,:-1]).mean()
-                tv_loss = (tv_h + tv_w) * x[6]   # 0.1은 가중치, 실험하며 조절
-                loss+=tv_loss
-                #print(l_mse.item(),l_per.item(),l_hf.item(),l_sat.item(),l_lab.item(),tv_loss.item())
-                loss.backward()
-                opt.step()
-            total_loss += loss.item()
-        model.eval()
-        val_loss = 0
-        mse_loss=0
-        per_loss=0
-        hf_loss=0
-        sat_loss=0
-        lab_loss=0
-        t_loss=0
-        with torch.no_grad():
-            struct_map = structure_model(lo_bc)
-            for lo, eh, cond, _ in va:
-                lo, eh, cond = lo.to(device), eh.to(device), cond.to(device)
-                b = cond[:, :1]
-                cs = cond[:, 1:]
-                # ① RGB → HSV
-                lo_hsv = KC.rgb_to_hsv(lo)  
-                # ② V 채널만 보정 (b는 0–1 스케일, HSV V 범위 0–1)
-                lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
-                # ③ HSV → RGB
-                lo_b = KC.hsv_to_rgb(lo_hsv)  
-                # ④ 색상 이동
-                lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
-
-                
-
                 residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                l_mse = mse(out, eh) * x[0]
-                l_per = perc(out, eh) * x[1]
-                #l_msk = ((out - eh).pow(2) * msk).mean() * x[2]
-                l_hf = F.l1_loss(laplacian(out), laplacian(eh)) *x[3]
-                hsv_out=KC.rgb_to_hsv(out)
-                hsv_gt=KC.rgb_to_hsv(eh)
-                l_sat=F.l1_loss(hsv_out[:,1:2,:,:], hsv_gt[:,1:2,:,:]) * x[4]
-                lab_out = KC.rgb_to_lab(out)
-                lab_eh = KC.rgb_to_lab(eh)
-                l_lab = F.l1_loss(lab_out[:,1:,:,:], lab_eh[:,1:,:,:]) * x[5]
-                tv_h = torch.abs(out[:,:,1:,:] - out[:,:,:-1,:]).mean()
-                tv_w = torch.abs(out[:,:,:,1:] - out[:,:,:,:-1]).mean()
-                tv_loss = (tv_h + tv_w) * x[6]   # 0.1은 가중치, 실험하며 조절
-                val_loss += (l_mse + l_per + l_hf + l_sat+l_lab+tv_loss).item()
+                l_mse = mse(out, eh)
+                l_per = perc(out, eh)
+                loss = l_mse + l_per
+                loss.backward()
+                opt.step()
+
+            total_loss += loss.item()
+
+        # validation
+        model.eval()
+        val_loss = 0
+        mse_loss = 0
+        per_loss = 0
+
+        with torch.no_grad():
+            for lo, eh, cond, msk in va:
+                lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
+                b = cond[:, :1]
+                cs = cond[:, 1:]
+
+                lo_hsv = KC.rgb_to_hsv(lo)
+                lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
+                lo_b = KC.hsv_to_rgb(lo_hsv)
+                lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
+
+                struct_map = structure_model(lo_bc)
+                residual = model(lo_bc, cs, struct_map)
+                out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+
+                l_mse = mse(out, eh)
+                l_per = perc(out, eh)
+
+                val_loss += (l_mse + l_per).item()
                 mse_loss += l_mse.item()
-                per_loss+=l_per.item()
-                hf_loss+=l_hf.item()
-                sat_loss+=l_sat.item()
-                lab_loss+=l_lab.item()
-                t_loss+=tv_loss.item()
+                per_loss += l_per.item()
+
         val_loss /= len(va)
         mse_loss /= len(va)
         per_loss /= len(va)
-        hf_loss /= len(va)
-        sat_loss /= len(va)
-        lab_loss /= len(va)
-        t_loss /= len(va)
         print(f"Ep {e+1}/{epochs} Train:{total_loss/len(tr):.4f} Val:{val_loss:.4f}")
-        print(f"mse_loss:{mse_loss:.4f} per_loss:{per_loss:.4f} hf_loss:{hf_loss:.4f} sat_loss:{sat_loss:.4f} lab_loss:{lab_loss:.4f} tv_loss:{t_loss:.4f}")
+        print(f"mse_loss:{mse_loss:.4f} per_loss:{per_loss:.4f}")
+
         lr_scheduler.step(val_loss)
         if val_loss < best:
             safe_save(model, 'best.pth')
@@ -419,13 +371,10 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             pat += 1
         if pat > 15:
             print('Early stopping triggered')
-        if a==0:
-            a=int(input())
-            y=int(input())
-            opt.param_groups[0]['lr']*=y
-        a-=1
-        print(opt.param_groups[0]['lr'])
+            break
+
     safe_save(model, 'final.pth')
+
 
 # ====================================================
 # 7. 추론
