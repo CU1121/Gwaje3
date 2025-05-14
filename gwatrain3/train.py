@@ -7,10 +7,10 @@ import torchvision.transforms as T
 from torch.utils.data import DataLoader, random_split
 import kornia.color as KC
 
-from 2_dataset import ConditionalLowLightDataset
-from 3_model import UNetConditionalModel, SimpleEdgeExtractor, laplacian
-from 4_loss import VGGPerceptualLoss
-from 5_utils import safe_save
+from dataset import ConditionalLowLightDataset
+from model import UNetConditionalModel, SimpleEdgeExtractor, laplacian
+from loss import VGGPerceptualLoss
+from utils import safe_save
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
