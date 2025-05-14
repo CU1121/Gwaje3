@@ -1,7 +1,7 @@
 
-from 1_metadata import analyze_and_generate_metadata
-from 6_train import train
-from 7_infer import inference
+from metadata import analyze_and_generate_metadata
+from train import train
+from infer import inference
 
 if __name__ == "__main__":
     mode = input("Mode(train/infer): ").strip().lower()
