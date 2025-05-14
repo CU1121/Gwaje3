@@ -9,6 +9,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch import nn, optim
 import torch.nn.functional as F
 import kornia.color as KC  # for LAB conversion
+import lpips  # ✅ LPIPS 추가
 
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
@@ -264,11 +265,10 @@ def safe_save(model, path):
         if os.path.exists(tmp): os.remove(tmp)
         print(f"❌ 저장 오류: {e}")
 
+
+
 # ====================================================
-# 6. 학습 루프
-# ====================================================
-# ====================================================
-# 6. 학습 루프 (MSE + Perceptual Loss만 사용)
+# 6. 학습 루프 (MSE + Perceptual + LPIPS Loss 추가)
 # ====================================================
 def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
     transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
@@ -287,6 +287,8 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
     perc = VGGPerceptualLoss()
     mse = nn.MSELoss()
+    lpips_loss = lpips.LPIPS(net='vgg').to(device)  # ✅ LPIPS 초기화
+
     best = float('inf')
     pat = 0
 
@@ -298,7 +300,6 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             cs = cond[:, 1:]
             lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
 
-            # ① RGB → HSV
             lo_hsv = KC.rgb_to_hsv(lo)
             lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
             lo_b = KC.hsv_to_rgb(lo_hsv)
@@ -313,7 +314,8 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                     out = torch.clamp(lo_bc + residual, 0.0, 1.0)
                     l_mse = mse(out, eh)
                     l_per = perc(out, eh)
-                    loss = l_mse + l_per
+                    l_lpips = lpips_loss(out, eh).mean()
+                    loss = l_mse + l_per + l_lpips
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
@@ -322,7 +324,8 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
                 l_mse = mse(out, eh)
                 l_per = perc(out, eh)
-                loss = l_mse + l_per
+                l_lpips = lpips_loss(out, eh).mean()
+                loss = l_mse + l_per + l_lpips
                 loss.backward()
                 opt.step()
 
@@ -333,6 +336,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
         val_loss = 0
         mse_loss = 0
         per_loss = 0
+        lpips_eval = 0
 
         with torch.no_grad():
             for lo, eh, cond, msk in va:
@@ -351,16 +355,19 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
                 l_mse = mse(out, eh)
                 l_per = perc(out, eh)
+                l_lpips = lpips_loss(out, eh).mean()
 
-                val_loss += (l_mse + l_per).item()
+                val_loss += (l_mse + l_per + l_lpips).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
+                lpips_eval += l_lpips.item()
 
         val_loss /= len(va)
         mse_loss /= len(va)
         per_loss /= len(va)
+        lpips_eval /= len(va)
         print(f"Ep {e+1}/{epochs} Train:{total_loss/len(tr):.4f} Val:{val_loss:.4f}")
-        print(f"mse_loss:{mse_loss:.4f} per_loss:{per_loss:.4f}")
+        print(f"mse:{mse_loss:.4f} perc:{per_loss:.4f} lpips:{lpips_eval:.4f}")
 
         lr_scheduler.step(val_loss)
         if val_loss < best:
@@ -374,6 +381,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             break
 
     safe_save(model, 'final.pth')
+
 
 
 # ====================================================
