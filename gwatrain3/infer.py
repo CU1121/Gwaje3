@@ -5,7 +5,7 @@ import numpy as np
 import torchvision.transforms as T
 import kornia.color as KC
 
-from 3_model import UNetConditionalModel, SimpleEdgeExtractor
+from model import UNetConditionalModel, SimpleEdgeExtractor
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
