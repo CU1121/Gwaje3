@@ -21,6 +21,26 @@ class SimpleEdgeExtractor(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class SaturationAdjustor(nn.Module):
+    """
+    Learns a global saturation scale factor per image.
+    Takes enhanced RGB image, predicts a [0,1] scale, then applies it to the S channel.
+    """
+    def __init__(self, in_channels=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),               # [B,3,1,1]
+            nn.Conv2d(in_channels, 16, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Sigmoid()                           # outputs scale in (0,1)
+        )
+
+    def forward(self, rgb: torch.Tensor):
+        # rgb: [B,3,H,W], values in [0,1]
+        scale = self.net(rgb)                   # [B,1,1,1]
+        return scale
+
 
 # 디바이스 설정
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -142,7 +162,7 @@ class ConditionalLowLightDataset(Dataset):
 
     def __getitem__(self, idx):
         enh = self.enh_files[idx]
-        base = enh.split('_')[0] +'.jpg'
+        base = enh.split('_')[0] + '.jpg'
         low_path = os.path.join(self.low_dir, base)
         enh_path = os.path.join(self.enh_dir, enh)
         mask_path = os.path.join(self.enh_dir, f"mask_{enh}")
@@ -165,12 +185,12 @@ class ConditionalLowLightDataset(Dataset):
             low_t = self.aug(low_t)
 
         if mask is None:
-            m = np.ones((600,400), dtype=np.float32)
+            m = np.ones((256,256), dtype=np.float32)
         else:
             try:
-                m = cv2.resize(mask, (600,400)).astype(np.float32) / 255.0
+                m = cv2.resize(mask, (256,256)).astype(np.float32) / 255.0
             except cv2.error:
-                m = np.ones((600,40), dtype=np.float32)
+                m = np.ones((256,256), dtype=np.float32)
         m_t = torch.tensor(m, dtype=torch.float32).unsqueeze(0).to(device)
 
         # Dataset.__getitem__ 내에서
@@ -199,7 +219,7 @@ class SEBlock(nn.Module):
 class UNetConditionalModel(nn.Module):
     def __init__(self, cond_dim=3):
         super().__init__()
-        self.cond_fc = nn.Linear(cond_dim, 600*400)
+        self.cond_fc = nn.Linear(cond_dim, 256*256)
         def block(in_c, out_c):
             return nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.ReLU(),
@@ -218,7 +238,7 @@ class UNetConditionalModel(nn.Module):
 
     def forward(self, x, cond, struct_map):
         b = x.size(0)
-        cm = self.cond_fc(cond).view(b,1,600,400)
+        cm = self.cond_fc(cond).view(b,1,256,256)
         x = torch.cat([x, cm], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
@@ -280,91 +300,76 @@ def safe_save(model, path):
 # ====================================================
 from kornia.filters import Sobel  # Sobel 필터 추가
 
-def train(low_dir, enh_dir, meta_file, epochs=600, bs=10, lr=2e-2):
+def train(low_dir, enh_dir, meta_file, epochs=1000, bs=5, lr=2e-2):
     transform = T.Compose([T.ToPILImage(), T.Resize((600,400)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
-    n_val = int(0.2 * len(ds))
-    n_tr = len(ds) - n_val
+    n_val = int(0.03 * len(ds)); n_tr = len(ds) - n_val
     tr_ds, va_ds = random_split(ds, [n_tr, n_val])
-    tr = DataLoader(tr_ds, bs, shuffle=True)
-    va = DataLoader(va_ds, bs)
-    
+    tr = DataLoader(tr_ds, bs, shuffle=True); va = DataLoader(va_ds, bs)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = UNetConditionalModel().to(device)
     structure_model = SimpleEdgeExtractor().to(device)
+    adjustor = SaturationAdjustor().to(device)
     sobel = Sobel().to(device)
 
-    opt = optim.Adam(model.parameters(), lr)
+    opt = optim.Adam(
+        list(model.parameters()) +
+        list(structure_model.parameters()) +
+        list(adjustor.parameters()),
+        lr
+    )
     scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
     sched = optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, steps_per_epoch=len(tr), epochs=epochs)
     lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=6)
 
-    perc = VGGPerceptualLoss()
-    mse = nn.MSELoss()
+    perc = VGGPerceptualLoss(); mse = nn.MSELoss()
     lpips_loss = lpips.LPIPS(net='vgg').to(device)
-
-    best = float('inf')
-    pat = 0
+    best = float('inf'); pat = 0
 
     for e in range(epochs):
-        model.train()
+        model.train(); structure_model.train(); adjustor.train()
         total_loss = 0
         for lo, eh, cond, msk in tr:
-            b = cond[:, :1]
-            cs = cond[:, 1:]
-            lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
-
+            # preprocessing: brightness & color shifts as before
+            b = cond[:, :1]; cs = cond[:, 1:]
             lo_hsv = KC.rgb_to_hsv(lo)
-            lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
+            lo_hsv[:,2:3] = torch.clamp(lo_hsv[:,2:3] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
             lo_b = KC.hsv_to_rgb(lo_hsv)
             lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
 
-            opt.zero_grad()
-
-            # 구조 맵: Sobel + 학습 기반
+            # structure maps
             gray = KC.rgb_to_grayscale(lo_bc)
             sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
             learned_map = structure_model(lo_bc)
-            struct_map = torch.cat([sobel_map, learned_map], dim=1)  # [B,2,H,W]
+            struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-            if torch.cuda.is_available():
-                with torch.amp.autocast(device_type='cuda'):
-                    residual = model(lo_bc, cs, struct_map)
-                    out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                    l_mse = mse(out, eh)
-                    l_per = perc(out, eh)
-                    l_lpips = lpips_loss(out, eh).mean()
-                    loss = l_mse + l_per + l_lpips
-                scaler.scale(loss).backward()
-                scaler.step(opt)
-                scaler.update()
-            else:
+            opt.zero_grad()
+            with torch.cuda.is_available() and torch.amp.autocast(device_type='cuda'):
                 residual = model(lo_bc, cs, struct_map)
-                out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                base = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                # saturation adjustment
+                scale = adjustor(base)
+                hsv = KC.rgb_to_hsv(base)
+                hsv[:,1:2] = torch.clamp(hsv[:,1:2] * scale, 0.0, 1.0)
+                out = torch.clamp(KC.hsv_to_rgb(hsv), 0.0, 1.0)
+
                 l_mse = mse(out, eh)
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
                 loss = l_mse + l_per + l_lpips
-                loss.backward()
-                opt.step()
-
+            scaler.scale(loss).backward()
+            scaler.step(opt); scaler.update()
             total_loss += loss.item()
 
-        # Validation
-        model.eval()
-        val_loss = 0
-        mse_loss = 0
-        per_loss = 0
-        lpips_eval = 0
-        psnr_eval=0
-
+        # validation loop
+        model.eval(); structure_model.eval(); adjustor.eval()
+        val_loss = mse_loss = per_loss = lpips_eval = psnr_eval = 0
         with torch.no_grad():
             for lo, eh, cond, msk in va:
-                lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
-                b = cond[:, :1]
-                cs = cond[:, 1:]
-
+                b = cond[:, :1]; cs = cond[:, 1:]
                 lo_hsv = KC.rgb_to_hsv(lo)
-                lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
+                lo_hsv[:,2:3] = torch.clamp(lo_hsv[:,2:3] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
                 lo_b = KC.hsv_to_rgb(lo_hsv)
                 lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
 
@@ -374,39 +379,32 @@ def train(low_dir, enh_dir, meta_file, epochs=600, bs=10, lr=2e-2):
                 struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
                 residual = model(lo_bc, cs, struct_map)
-                out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                base = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                scale = adjustor(base)
+                hsv = KC.rgb_to_hsv(base)
+                hsv[:,1:2] = torch.clamp(hsv[:,1:2] * scale, 0.0, 1.0)
+                out = torch.clamp(KC.hsv_to_rgb(hsv), 0.0, 1.0)
 
                 l_mse = mse(out, eh)
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
-
                 val_loss += (l_mse + l_per + l_lpips).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
                 psnr_eval += psnr(out, eh)
 
-        val_loss /= len(va)
-        mse_loss /= len(va)
-        per_loss /= len(va)
-        lpips_eval /= len(va)
-        psnr_eval /= len(va)
-        print(f"Ep {e+1}/{epochs} Train:{total_loss/len(tr):.4f} Val:{val_loss:.4f}")
-        print(f"mse:{mse_loss:.4f} perc:{per_loss:.4f} lpips:{lpips_eval:.4f}")
-        print(f"psnr : {psnr_eval:.2f}dB")
-
-        lr_scheduler.step(val_loss)
+        lr_scheduler.step(val_loss);
         if val_loss < best:
-            safe_save(model, 'best.pth')
-            best = val_loss
-            pat = 0
+            safe_save(model, 'best.pth'); safe_save(adjustor, 'sat_adjustor.pth'); best = val_loss; pat = 0
         else:
             pat += 1
         if pat > 15:
-            print('Early stopping triggered')
             break
 
     safe_save(model, 'final.pth')
+    safe_save(adjustor, 'sat_adjustor.pth')
+
 
 
 
@@ -431,78 +429,64 @@ def draw_sel(event, x, y, flags, param):
 
 
 def inference(image_path, brightness, shifts):
-    global temp_sel, mask_sel, draw_flag
-
-    # 1. 이미지 로드 및 사용자 마우스 입력으로 영역 선택
+    global temp_sel, mask_sel
     image = cv2.imread(image_path)
     temp_sel = image.copy()
     mask_sel = np.zeros(image.shape[:2], dtype=np.uint8)
-    draw_flag = False
-
-    cv2.namedWindow("영역 선택 (q: 완료)")
-    cv2.setMouseCallback("영역 선택 (q: 완료)", draw_sel)
+    cv2.namedWindow("Select Region (q to finish)")
+    cv2.setMouseCallback("Select Region (q to finish)", draw_sel)
     while True:
-        cv2.imshow("영역 선택 (q: 완료)", temp_sel)
+        cv2.imshow("Select Region (q to finish)", temp_sel)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     cv2.destroyAllWindows()
 
-    # 2. 입력 이미지 전처리
-    transform = T.Compose([
-        T.ToPILImage(),
-        T.Resize((600,400)),
-        T.ToTensor()
-    ])
+    transform = T.Compose([T.ToPILImage(), T.Resize((600,400)), T.ToTensor()])
     input_tensor = transform(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(device)
-
     cond = [brightness/255.0] + [s/255.0 for s in shifts]
     condition_tensor = torch.tensor([cond], dtype=torch.float32).to(device)
-
-    # 마스크 처리
     mask_resized = cv2.resize(mask_sel, (input_tensor.shape[3], input_tensor.shape[2]))
-    mask_tensor = (torch.from_numpy(mask_resized.astype(np.float32) / 255.0)
-                   .unsqueeze(0).unsqueeze(0).to(device))  # (1,1,H,W)
-
-    # 3. 밝기 및 컬러 사전 보정
-    b  = condition_tensor[:, :1]
-    cs = condition_tensor[:, 1:]
+    mask_tensor = torch.from_numpy(mask_resized.astype(np.float32)/255.0).unsqueeze(0).unsqueeze(0).to(device)
 
     lo_hsv = KC.rgb_to_hsv(input_tensor)
-    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor, 0.0, 1.0)
+    lo_hsv[:,2:3] = torch.clamp(lo_hsv[:,2:3] + condition_tensor[:,:1].view(-1,1,1,1)*mask_tensor, 0.0, 1.0)
     lo_b = KC.hsv_to_rgb(lo_hsv)
-    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
+    lo_bc = torch.clamp(lo_b + condition_tensor[:,1:].view(-1,3,1,1)*mask_tensor, 0.0, 1.0)
 
-    # 4. 모델 및 구조 맵 준비
-    model = UNetConditionalModel(cond_dim=3).to(device)
+    model = UNetConditionalModel().to(device)
     structure_model = SimpleEdgeExtractor().to(device)
+    adjustor = SaturationAdjustor().to(device)
     sobel = Sobel().to(device)
 
-    model.load_state_dict(torch.load("final.pth", map_location=device))
-    model.eval()
-    structure_model.eval()
-    sobel.eval()
+    model.load_state_dict(torch.load('final.pth', map_location=device)); model.eval()
+    structure_model.load_state_dict(torch.load('best_structure.pth', map_location=device)); structure_model.eval()
+    adjustor.load_state_dict(torch.load('sat_adjustor.pth', map_location=device)); adjustor.eval()
 
     with torch.no_grad():
-        # 구조 맵 (Sobel + 학습 기반)
         gray = KC.rgb_to_grayscale(lo_bc)
         sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
         learned_map = structure_model(lo_bc)
-        struct_map = torch.cat([sobel_map, learned_map], dim=1)  # [B,2,H,W]
+        struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-        residual   = model(lo_bc, cs, struct_map)
-        out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
+        residual = model(lo_bc, condition_tensor[:,1:], struct_map)
+        base = torch.clamp(lo_bc + residual, 0.0, 1.0)
+        scale = adjustor(base)
+        hsv = KC.rgb_to_hsv(base)
+        hsv[:,1:2] = torch.clamp(hsv[:,1:2] * scale, 0.0, 1.0)
+        out_tensor = torch.clamp(KC.hsv_to_rgb(hsv), 0.0, 1.0)[0]
 
-    # 5. 결과 이미지 생성 및 마스킹 합성
+    # 5. Generate final image and composite with mask
     output_img = (out_tensor.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8)
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
-    mask_full  = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
-    mask_3ch   = np.stack([mask_full]*3, axis=2)
-    result     = np.where(mask_3ch==255, output_bgr, image)
+    mask_full = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
+    mask_3ch = np.stack([mask_full]*3, axis=2)
+    result = np.where(mask_3ch==255, output_bgr, image)
 
-    # 6. 결과 출력
-    cv2.imshow("AI 보정 결과", result)
+    # 6. Display the result
+    cv2.imshow("AI Enhancement Result", result)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
 
 
 
