@@ -300,10 +300,10 @@ def safe_save(model, path):
 # ====================================================
 from kornia.filters import Sobel  # Sobel 필터 추가
 
-def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
+def train(low_dir, enh_dir, meta_file, epochs=1000, bs=5, lr=2e-2):
     transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
-    n_val = int(0.2 * len(ds)); n_tr = len(ds) - n_val
+    n_val = int(0.03 * len(ds)); n_tr = len(ds) - n_val
     tr_ds, va_ds = random_split(ds, [n_tr, n_val])
     tr = DataLoader(tr_ds, bs, shuffle=True); va = DataLoader(va_ds, bs)
 
