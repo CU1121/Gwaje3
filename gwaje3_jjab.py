@@ -201,7 +201,6 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
         model.train(); tr_loss = 0
         for lo, eh, cond, msk in tr_dl:
             lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
-            msk = msk.unsqueeze(1)
             opt.zero_grad()
             out = forward_pass(lo, cond, msk, model, edge_net, sobel)
             loss = mse(out, eh) + perc(out, eh) + lp(out, eh).mean()
@@ -211,7 +210,6 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
         with torch.no_grad():
             for lo, eh, cond, msk in va_dl:
                 lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
-                msk = msk.unsqueeze(1)
                 out = forward_pass(lo, cond, msk, model, edge_net, sobel)
                 val_loss += (mse(out, eh) + perc(out, eh) + lp(out, eh).mean()).item()
         val_loss /= len(va_dl)
