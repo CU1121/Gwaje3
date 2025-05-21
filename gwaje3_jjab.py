@@ -15,8 +15,8 @@ from kornia.filters import Sobel  # Sobel 엣지 필터
 # ====================================================
 # 글로벌 이미지 크기 설정 (H, W)
 # ====================================================
-IMG_H = 400  # height
-IMG_W = 600  # width
+IMG_H = 400
+IMG_W = 600
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -99,7 +99,26 @@ class VGGPerceptualLoss(nn.Module):
         return self.crit(self.net(x), self.net(y))
 
 # ====================================================
-# 1. 메타데이터 생성: brightness, RGB shift, saturation shift
+# 전역 forward_pass 정의 (train/infer 공용)
+# ====================================================
+def forward_pass(lo, cond, msk, model, edge_net, sobel):
+    b = cond[:, 0:1]; cs = cond[:, 1:4]; s = cond[:, 4:5]
+    lo_h = KC.rgb_to_hsv(lo)
+    lo_h[:, 2:3, :, :] = torch.clamp(lo_h[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * msk, 0, 1)
+    lo_b = KC.hsv_to_rgb(lo_h)
+    lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * msk, 0, 1)
+    gray = KC.rgb_to_grayscale(lo_bc)
+    sm = torch.norm(sobel(gray), dim=1, keepdim=True)
+    lm = edge_net(lo_bc)
+    struct = torch.cat([sm, lm], dim=1)
+    res = model(lo_bc, cond, struct)
+    out_raw = torch.clamp(lo_bc + res, 0, 1)
+    out_h = KC.rgb_to_hsv(out_raw)
+    out_h[:, 1:2, :, :] = torch.clamp(out_h[:, 1:2, :, :] + s.view(-1, 1, 1, 1) * msk, 0, 1)
+    return KC.hsv_to_rgb(out_h)
+
+# ====================================================
+# 1. 메타데이터 생성
 # ====================================================
 def analyze_and_generate_metadata(low_dir, enh_dir, save_name="metadata.json"):
     meta = {}
@@ -158,7 +177,7 @@ class ConditionalLowLightDataset(Dataset):
         return low_t, enh_t, cond, m_t
 
 # ====================================================
-# 3. 학습 루프: V, RGB, S 선후보정 + 멀티 손실
+# 3. 학습 루프
 # ====================================================
 def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
     ds = ConditionalLowLightDataset(
@@ -178,31 +197,13 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
     lp = lpips.LPIPS(net='vgg').to(device)
     best, pat = float('inf'), 0
 
-    def forward_pass(lo, cond, msk):
-        b = cond[:, 0:1]; cs = cond[:, 1:4]; s = cond[:, 4:5]
-        lo_h = KC.rgb_to_hsv(lo)
-        # 밝기 채널(V) 보정
-        lo_h[:, 2:3, :, :] = torch.clamp(lo_h[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * msk, 0, 1)
-        lo_b = KC.hsv_to_rgb(lo_h)
-        lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * msk, 0, 1)
-        gray = KC.rgb_to_grayscale(lo_bc)
-        sm = torch.norm(sobel(gray), dim=1, keepdim=True)
-        lm = edge_net(lo_bc)
-        struct = torch.cat([sm, lm], dim=1)
-        res = model(lo_bc, cond, struct)
-        out_raw = torch.clamp(lo_bc + res, 0, 1)
-        out_h = KC.rgb_to_hsv(out_raw)
-        # 포화도 채널(S) 후보정
-        out_h[:, 1:2, :, :] = torch.clamp(out_h[:, 1:2, :, :] + s.view(-1, 1, 1, 1) * msk, 0, 1)
-        return KC.hsv_to_rgb(out_h)
-
     for e in range(epochs):
         model.train(); tr_loss = 0
         for lo, eh, cond, msk in tr_dl:
             lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
             msk = msk.unsqueeze(1)
             opt.zero_grad()
-            out = forward_pass(lo, cond, msk)
+            out = forward_pass(lo, cond, msk, model, edge_net, sobel)
             loss = mse(out, eh) + perc(out, eh) + lp(out, eh).mean()
             loss.backward(); opt.step()
             tr_loss += loss.item()
@@ -211,7 +212,7 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
             for lo, eh, cond, msk in va_dl:
                 lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
                 msk = msk.unsqueeze(1)
-                out = forward_pass(lo, cond, msk)
+                out = forward_pass(lo, cond, msk, model, edge_net, sobel)
                 val_loss += (mse(out, eh) + perc(out, eh) + lp(out, eh).mean()).item()
         val_loss /= len(va_dl)
         print(f"Epoch {e+1}/{epochs} → Train: {tr_loss/len(tr_dl):.4f}, Val: {val_loss:.4f}")
@@ -227,7 +228,7 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
     print("✅ 학습 완료")
 
 # ====================================================
-# 4. 추론: V, RGB, S 후보정 통합
+# 4. 추론
 # ====================================================
 def inference(path, brightness, rgb_shift, sat_shift):
     img = cv2.imread(path)
@@ -238,4 +239,27 @@ def inference(path, brightness, rgb_shift, sat_shift):
     model = UNetConditionalModel().to(device)
     model.load_state_dict(torch.load('final.pth', map_location=device))
     model.eval()
-    edge_net = SimpleEdgeExtractor().
+    edge_net = SimpleEdgeExtractor().to(device)
+    sobel = Sobel().to(device)
+    with torch.no_grad():
+        out = forward_pass(in_t, cond, msk, model, edge_net, sobel)
+    res = (out[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    cv2.imshow('AI 보정 결과', cv2.cvtColor(res, cv2.COLOR_RGB2BGR))
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+if __name__ == '__main__':
+    mode = input('Mode(train/infer): ')
+    if mode == 'train':
+        low = input('Low dir: ')
+        enh = input('Enh dir: ')
+        analyze_and_generate_metadata(low, enh)
+        train(low, enh, os.path.join(enh, 'metadata.json'))
+    elif mode == 'infer':
+        path = input('Image path: ')
+        v = float(input('ΔV (brightness adjustment): '))
+        r = list(map(float, input('RGB shifts (R G B): ').split()))
+        s = float(input('ΔS (saturation adjustment): '))
+        inference(path, v, r, s)
+    else:
+        print('Unknown mode')
