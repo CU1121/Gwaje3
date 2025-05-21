@@ -10,6 +10,13 @@ from torch import nn, optim
 import torch.nn.functional as F
 import kornia.color as KC  # for LAB conversion
 import lpips  # ✅ LPIPS 추가
+from kornia.filters import Sobel  # Sobel 필터 추가
+
+# ====================================================
+# 글로벌 이미지 크기 설정 (H, W)
+# ====================================================
+IMG_H = 400  # height
+IMG_W = 600  # width
 
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
@@ -25,8 +32,8 @@ class SimpleEdgeExtractor(nn.Module):
 # 디바이스 설정
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
 def make_laplacian_kernel(k):
-    # k×k 라플라시안 커널: 주변에 -1, 중앙에 k*k - 1
     lap = -torch.ones((k, k), dtype=torch.float32)
     lap[k//2, k//2] = k*k - 1
     return lap
@@ -38,33 +45,25 @@ def multi_scale_hf_loss(out, gt):
     weights = [1.0, 0.5, 0.25]
 
     for k, w in zip(scales, weights):
-        # 1) 라플라시안 2D 커널 생성
-        lap2d = make_laplacian_kernel(k).to(out.device)            # (k,k)
-        lap4d = lap2d.expand(C, 1, k, k)                           # (C,1,k,k) for group conv
-
-        # 2) same padding
+        lap2d = make_laplacian_kernel(k).to(out.device)
+        lap4d = lap2d.expand(C, 1, k, k)
         pad = k // 2
-
-        # 3) 그룹 컨볼루션으로 채널별 적용
         hf_out = F.conv2d(out, lap4d, padding=pad, groups=C)
         hf_gt  = F.conv2d(gt,  lap4d, padding=pad, groups=C)
-
-        # 4) L1 손실에 스케일 가중치 곱
         losses.append(w * F.l1_loss(hf_out, hf_gt))
 
     return sum(losses)
 
-#psnr 출력
 def psnr(x: torch.Tensor, y: torch.Tensor, max_val: float = 1.0):
-    """x, y ∈ [0, 1]. Computes average PSNR of a batch."""
-    mse = F.mse_loss(x, y, reduction='none')  # shape: (B, C, H, W)
-    mse = mse.flatten(start_dim=1).mean(dim=1)  # shape: (B,)
+    mse = F.mse_loss(x, y, reduction='none')
+    mse = mse.flatten(start_dim=1).mean(dim=1)
     psnr = 10 * torch.log10(max_val**2 / (mse + 1e-8))
     return psnr.mean().item()
 
 # ====================================================
 # 1. 메타데이터 생성
 # ====================================================
+
 def analyze_and_generate_metadata(low_dir, enh_dir, save_name="metadata.json"):
     metadata = {}
     low_files = sorted(os.listdir(low_dir))
@@ -79,35 +78,24 @@ def analyze_and_generate_metadata(low_dir, enh_dir, save_name="metadata.json"):
         if low_bgr is None or enh_bgr is None:
             continue
 
-        # ▶ RGB → HSV
         low_hsv = cv2.cvtColor(low_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
         enh_hsv = cv2.cvtColor(enh_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-        # ▶ 동일한 mask 사용
         diff_rgb = cv2.absdiff(low_bgr, enh_bgr)
         mask     = (cv2.cvtColor(diff_rgb, cv2.COLOR_BGR2GRAY) > 15).astype(np.uint8)*255
 
-        # ▶ V 채널(명도) 차이 계산
         V_low_px = low_hsv[...,2][mask>0]
         V_enh_px = enh_hsv[...,2][mask>0]
-        if len(V_low_px) > 0:
-            v_diff = float(np.mean(V_enh_px) - np.mean(V_low_px))
-        else:
-            v_diff = 0.0
+        v_diff = float(np.mean(V_enh_px) - np.mean(V_low_px)) if len(V_low_px) > 0 else 0.0
 
-        # 3) lo_lab를 밝기만 보정
         lo_hsv_adj = low_hsv.copy()
         lo_hsv_adj[...,2] = np.clip(lo_hsv_adj[...,2] + v_diff, 0, 255)
-
-        # Lab → RGB 로 다시 변환
         lo_rgb_adj = cv2.cvtColor(lo_hsv_adj.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
-
-        # 4) 컬러 차이: 보정된 low와 high를 RGB 차이로 계산
         color_diff = np.mean(enh_bgr.astype(np.float32) - lo_rgb_adj, axis=(0,1)).tolist()
 
         metadata[enh_f] = {
-            "brightness": v_diff,       # L 스케일(0–100)
-            "color_shift": color_diff        # RGB 스케일 차이
+            "brightness": v_diff,
+            "color_shift": color_diff
         }
         print(v_diff, color_diff)
         cv2.imwrite(os.path.join(enh_dir, f"mask_{enh_f}"), mask)
@@ -165,15 +153,14 @@ class ConditionalLowLightDataset(Dataset):
             low_t = self.aug(low_t)
 
         if mask is None:
-            m = np.ones((600,400), dtype=np.float32)
+            m = np.ones((IMG_H, IMG_W), dtype=np.float32)
         else:
             try:
-                m = cv2.resize(mask, (600,400)).astype(np.float32) / 255.0
+                m = cv2.resize(mask, (IMG_W, IMG_H)).astype(np.float32) / 255.0
             except cv2.error:
-                m = np.ones((600,400), dtype=np.float32)
+                m = np.ones((IMG_H, IMG_W), dtype=np.float32)
         m_t = torch.tensor(m, dtype=torch.float32).unsqueeze(0).to(device)
 
-        # Dataset.__getitem__ 내에서
         md = self.meta[enh]
         brightness = md['brightness'] / 255.0
         color_shifts = [c / 255.0 for c in md['color_shift']]
@@ -197,9 +184,11 @@ class SEBlock(nn.Module):
 
 
 class UNetConditionalModel(nn.Module):
-    def __init__(self, cond_dim=3):
+    def __init__(self, cond_dim=3, img_h: int = IMG_H, img_w: int = IMG_W):
         super().__init__()
-        self.cond_fc = nn.Linear(cond_dim, 600*400)
+        self.img_h = img_h
+        self.img_w = img_w
+        self.cond_fc = nn.Linear(cond_dim, img_h * img_w)
         def block(in_c, out_c):
             return nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.ReLU(),
@@ -218,22 +207,20 @@ class UNetConditionalModel(nn.Module):
 
     def forward(self, x, cond, struct_map):
         b = x.size(0)
-        cm = self.cond_fc(cond).view(b,1,600,400)
+        cm = self.cond_fc(cond).view(b,1,self.img_h,self.img_w)
         x = torch.cat([x, cm], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
         bn = self.bott(self.pool(e2))
-        
-        # 🔽 구조 map을 dec에 반복해서 사용
+
         s_down1 = F.interpolate(struct_map, scale_factor=0.5, mode='bilinear', align_corners=False)
-        s_down2 = F.interpolate(struct_map, scale_factor=1.0, mode='bilinear', align_corners=False)
+        s_down2 = struct_map
 
         d2 = self.dec2(torch.cat([self.up(bn), e2, s_down1], dim=1))
         d1 = self.dec1(torch.cat([self.up(d2), e1, s_down2], dim=1))
         return self.final(d1)
 
 
-# 고주파 경계 강조용 라플라시안 연산
 def laplacian(x):
     kernel = torch.tensor([[0,-1,0],[-1,4,-1],[0,-1,0]], dtype=torch.float32, device=x.device)
     kernel = kernel.view(1,1,3,3).repeat(x.size(1),1,1,1)
@@ -263,6 +250,7 @@ class VGGPerceptualLoss(nn.Module):
 # ====================================================
 # 5. 저장 유틸
 # ====================================================
+
 def safe_save(model, path):
     tmp = path + '.tmp'
     try:
@@ -274,22 +262,20 @@ def safe_save(model, path):
         print(f"❌ 저장 오류: {e}")
 
 
-
 # ====================================================
 # 6. 학습 루프 (MSE + Perceptual + LPIPS Loss 추가)
 # ====================================================
-from kornia.filters import Sobel  # Sobel 필터 추가
 
 def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
-    transform = T.Compose([T.ToPILImage(), T.Resize((600,400)), T.ToTensor()])
+    transform = T.Compose([T.ToPILImage(), T.Resize((IMG_H, IMG_W)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
     n_val = int(0.2 * len(ds))
     n_tr = len(ds) - n_val
     tr_ds, va_ds = random_split(ds, [n_tr, n_val])
     tr = DataLoader(tr_ds, bs, shuffle=True)
     va = DataLoader(va_ds, bs)
-    
-    model = UNetConditionalModel().to(device)
+
+    model = UNetConditionalModel(img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
     sobel = Sobel().to(device)
 
@@ -320,11 +306,10 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
             opt.zero_grad()
 
-            # 구조 맵: Sobel + 학습 기반
             gray = KC.rgb_to_grayscale(lo_bc)
             sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
             learned_map = structure_model(lo_bc)
-            struct_map = torch.cat([sobel_map, learned_map], dim=1)  # [B,2,H,W]
+            struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
             if torch.cuda.is_available():
                 with torch.amp.autocast(device_type='cuda'):
@@ -349,13 +334,8 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
             total_loss += loss.item()
 
-        # Validation
         model.eval()
-        val_loss = 0
-        mse_loss = 0
-        per_loss = 0
-        lpips_eval = 0
-        psnr_eval=0
+        val_loss = mse_loss = per_loss = lpips_eval = psnr_eval = 0
 
         with torch.no_grad():
             for lo, eh, cond, msk in va:
@@ -408,16 +388,14 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
     safe_save(model, 'final.pth')
 
-
-
 # ====================================================
 # 7. 추론
 # ====================================================
-# 전역 변수 선언
 
 draw_flag = False
 mask_sel = None
 temp_sel = None
+
 
 def draw_sel(event, x, y, flags, param):
     global draw_flag, mask_sel, temp_sel
@@ -433,7 +411,6 @@ def draw_sel(event, x, y, flags, param):
 def inference(image_path, brightness, shifts):
     global temp_sel, mask_sel, draw_flag
 
-    # 1. 이미지 로드 및 사용자 마우스 입력으로 영역 선택
     image = cv2.imread(image_path)
     temp_sel = image.copy()
     mask_sel = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -447,10 +424,9 @@ def inference(image_path, brightness, shifts):
             break
     cv2.destroyAllWindows()
 
-    # 2. 입력 이미지 전처리
     transform = T.Compose([
         T.ToPILImage(),
-        T.Resize((600,400)),
+        T.Resize((IMG_H, IMG_W)),
         T.ToTensor()
     ])
     input_tensor = transform(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(device)
@@ -458,12 +434,10 @@ def inference(image_path, brightness, shifts):
     cond = [brightness/255.0] + [s/255.0 for s in shifts]
     condition_tensor = torch.tensor([cond], dtype=torch.float32).to(device)
 
-    # 마스크 처리
     mask_resized = cv2.resize(mask_sel, (input_tensor.shape[3], input_tensor.shape[2]))
     mask_tensor = (torch.from_numpy(mask_resized.astype(np.float32) / 255.0)
-                   .unsqueeze(0).unsqueeze(0).to(device))  # (1,1,H,W)
+                   .unsqueeze(0).unsqueeze(0).to(device))
 
-    # 3. 밝기 및 컬러 사전 보정
     b  = condition_tensor[:, :1]
     cs = condition_tensor[:, 1:]
 
@@ -472,8 +446,7 @@ def inference(image_path, brightness, shifts):
     lo_b = KC.hsv_to_rgb(lo_hsv)
     lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
 
-    # 4. 모델 및 구조 맵 준비
-    model = UNetConditionalModel(cond_dim=3).to(device)
+    model = UNetConditionalModel(cond_dim=3, img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
     sobel = Sobel().to(device)
 
@@ -483,27 +456,23 @@ def inference(image_path, brightness, shifts):
     sobel.eval()
 
     with torch.no_grad():
-        # 구조 맵 (Sobel + 학습 기반)
         gray = KC.rgb_to_grayscale(lo_bc)
         sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
         learned_map = structure_model(lo_bc)
-        struct_map = torch.cat([sobel_map, learned_map], dim=1)  # [B,2,H,W]
+        struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
         residual   = model(lo_bc, cs, struct_map)
         out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
 
-    # 5. 결과 이미지 생성 및 마스킹 합성
     output_img = (out_tensor.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8)
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
     mask_full  = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
     mask_3ch   = np.stack([mask_full]*3, axis=2)
     result     = np.where(mask_3ch==255, output_bgr, image)
 
-    # 6. 결과 출력
     cv2.imshow("AI 보정 결과", result)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
 
 
 if __name__ == "__main__":
