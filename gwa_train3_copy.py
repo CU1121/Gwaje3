@@ -280,8 +280,8 @@ def safe_save(model, path):
 # ====================================================
 from kornia.filters import Sobel  # Sobel 필터 추가
 
-def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
-    transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
+def train(low_dir, enh_dir, meta_file, epochs=600, bs=10, lr=2e-2):
+    transform = T.Compose([T.ToPILImage(), T.Resize((600,400)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
     n_val = int(0.2 * len(ds))
     n_tr = len(ds) - n_val
@@ -450,7 +450,7 @@ def inference(image_path, brightness, shifts):
     # 2. 입력 이미지 전처리
     transform = T.Compose([
         T.ToPILImage(),
-        T.Resize((256,256)),
+        T.Resize((600,400)),
         T.ToTensor()
     ])
     input_tensor = transform(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(device)
