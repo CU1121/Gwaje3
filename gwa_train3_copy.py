@@ -142,7 +142,7 @@ class ConditionalLowLightDataset(Dataset):
 
     def __getitem__(self, idx):
         enh = self.enh_files[idx]
-        base = enh.split('_')[0] + '.jpg'
+        base = enh.split('_')[0] 
         low_path = os.path.join(self.low_dir, base)
         enh_path = os.path.join(self.enh_dir, enh)
         mask_path = os.path.join(self.enh_dir, f"mask_{enh}")
