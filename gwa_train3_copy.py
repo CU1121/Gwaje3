@@ -165,12 +165,12 @@ class ConditionalLowLightDataset(Dataset):
             low_t = self.aug(low_t)
 
         if mask is None:
-            m = np.ones((256,256), dtype=np.float32)
+            m = np.ones((600,400), dtype=np.float32)
         else:
             try:
-                m = cv2.resize(mask, (256,256)).astype(np.float32) / 255.0
+                m = cv2.resize(mask, (600,400)).astype(np.float32) / 255.0
             except cv2.error:
-                m = np.ones((256,256), dtype=np.float32)
+                m = np.ones((600,40), dtype=np.float32)
         m_t = torch.tensor(m, dtype=torch.float32).unsqueeze(0).to(device)
 
         # Dataset.__getitem__ 내에서
@@ -199,7 +199,7 @@ class SEBlock(nn.Module):
 class UNetConditionalModel(nn.Module):
     def __init__(self, cond_dim=3):
         super().__init__()
-        self.cond_fc = nn.Linear(cond_dim, 256*256)
+        self.cond_fc = nn.Linear(cond_dim, 600*400)
         def block(in_c, out_c):
             return nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.ReLU(),
@@ -218,7 +218,7 @@ class UNetConditionalModel(nn.Module):
 
     def forward(self, x, cond, struct_map):
         b = x.size(0)
-        cm = self.cond_fc(cond).view(b,1,256,256)
+        cm = self.cond_fc(cond).view(b,1,600,400)
         x = torch.cat([x, cm], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
