@@ -301,7 +301,7 @@ def safe_save(model, path):
 from kornia.filters import Sobel  # Sobel 필터 추가
 
 def train(low_dir, enh_dir, meta_file, epochs=1000, bs=5, lr=2e-2):
-    transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
+    transform = T.Compose([T.ToPILImage(), T.Resize((600,400)), T.ToTensor()])
     ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
     n_val = int(0.03 * len(ds)); n_tr = len(ds) - n_val
     tr_ds, va_ds = random_split(ds, [n_tr, n_val])
@@ -441,7 +441,7 @@ def inference(image_path, brightness, shifts):
             break
     cv2.destroyAllWindows()
 
-    transform = T.Compose([T.ToPILImage(), T.Resize((256,256)), T.ToTensor()])
+    transform = T.Compose([T.ToPILImage(), T.Resize((600,400)), T.ToTensor()])
     input_tensor = transform(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(device)
     cond = [brightness/255.0] + [s/255.0 for s in shifts]
     condition_tensor = torch.tensor([cond], dtype=torch.float32).to(device)
