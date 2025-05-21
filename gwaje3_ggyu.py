@@ -218,7 +218,7 @@ class UNetConditionalModel(nn.Module):
 
     def forward(self, x, cond, struct_map):
         b = x.size(0)
-        cm = self.cond_fc(cond).view(b,1,256,256)
+        cm = self.cond_fc(cond).view(b,1,600,400)
         x = torch.cat([x, cm], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
