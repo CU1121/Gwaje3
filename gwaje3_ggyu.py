@@ -199,7 +199,7 @@ class SEBlock(nn.Module):
 class UNetConditionalModel(nn.Module):
     def __init__(self, cond_dim=3):
         super().__init__()
-        self.cond_fc = nn.Linear(cond_dim, 256*256)
+        self.cond_fc = nn.Linear(cond_dim, 600*400)
         def block(in_c, out_c):
             return nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.ReLU(),
