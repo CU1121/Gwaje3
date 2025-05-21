@@ -54,6 +54,14 @@ def multi_scale_hf_loss(out, gt):
 
     return sum(losses)
 
+#psnr 출력
+def psnr(x: torch.Tensor, y: torch.Tensor, max_val: float = 1.0):
+    """x, y ∈ [0, 1]. Computes average PSNR of a batch."""
+    mse = F.mse_loss(x, y, reduction='none')  # shape: (B, C, H, W)
+    mse = mse.flatten(start_dim=1).mean(dim=1)  # shape: (B,)
+    psnr = 10 * torch.log10(max_val**2 / (mse + 1e-8))
+    return psnr.mean().item()
+
 # ====================================================
 # 1. 메타데이터 생성
 # ====================================================
@@ -347,6 +355,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
         mse_loss = 0
         per_loss = 0
         lpips_eval = 0
+        psnr_eval=0
 
         with torch.no_grad():
             for lo, eh, cond, msk in va:
@@ -375,13 +384,16 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
+                psnr_eval += psnr(out, eh)
 
         val_loss /= len(va)
         mse_loss /= len(va)
         per_loss /= len(va)
         lpips_eval /= len(va)
+        psnr_eval /= len(va)
         print(f"Ep {e+1}/{epochs} Train:{total_loss/len(tr):.4f} Val:{val_loss:.4f}")
         print(f"mse:{mse_loss:.4f} perc:{per_loss:.4f} lpips:{lpips_eval:.4f}")
+        print(f"psnr : {psnr_eval:.2f}dB")
 
         lr_scheduler.step(val_loss)
         if val_loss < best:
