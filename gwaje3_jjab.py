@@ -181,7 +181,8 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
     def forward_pass(lo, cond, msk):
         b = cond[:, 0:1]; cs = cond[:, 1:4]; s = cond[:, 4:5]
         lo_h = KC.rgb_to_hsv(lo)
-        lo_h[:, :, 2:, :, :] = torch.clamp(lo_h[:, :, 2:, :, :] + b.view(-1, 1, 1, 1) * msk, 0, 1)
+        # 밝기 채널(V) 보정
+        lo_h[:, 2:3, :, :] = torch.clamp(lo_h[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * msk, 0, 1)
         lo_b = KC.hsv_to_rgb(lo_h)
         lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * msk, 0, 1)
         gray = KC.rgb_to_grayscale(lo_bc)
@@ -191,7 +192,8 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
         res = model(lo_bc, cond, struct)
         out_raw = torch.clamp(lo_bc + res, 0, 1)
         out_h = KC.rgb_to_hsv(out_raw)
-        out_h[:, :, 1:2, :, :] = torch.clamp(out_h[:, :, 1:2, :, :] + s.view(-1, 1, 1, 1) * msk, 0, 1)
+        # 포화도 채널(S) 후보정
+        out_h[:, 1:2, :, :] = torch.clamp(out_h[:, 1:2, :, :] + s.view(-1, 1, 1, 1) * msk, 0, 1)
         return KC.hsv_to_rgb(out_h)
 
     for e in range(epochs):
@@ -227,7 +229,6 @@ def train(low_dir, enh_dir, meta_file, epochs=100, bs=4, lr=2e-3):
 # ====================================================
 # 4. 추론: V, RGB, S 후보정 통합
 # ====================================================
-
 def inference(path, brightness, rgb_shift, sat_shift):
     img = cv2.imread(path)
     transform = T.Compose([T.ToPILImage(), T.Resize((IMG_H, IMG_W)), T.ToTensor()])
@@ -237,27 +238,4 @@ def inference(path, brightness, rgb_shift, sat_shift):
     model = UNetConditionalModel().to(device)
     model.load_state_dict(torch.load('final.pth', map_location=device))
     model.eval()
-    edge_net = SimpleEdgeExtractor().to(device)
-    sobel = Sobel().to(device)
-    with torch.no_grad():
-        out = forward_pass(in_t, cond, msk)
-    res = (out[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-    cv2.imshow('AI 보정 결과', cv2.cvtColor(res, cv2.COLOR_RGB2BGR))
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-if __name__ == '__main__':
-    mode = input('Mode(train/infer): ')
-    if mode == 'train':
-        low = input('Low dir: ')
-        enh = input('Enh dir: ')
-        analyze_and_generate_metadata(low, enh)
-        train(low, enh, os.path.join(enh, 'metadata.json'))
-    elif mode == 'infer':
-        path = input('Image path: ')
-        v = float(input('ΔV (brightness adjustment): '))
-        r = list(map(float, input('RGB shifts (R G B): ').split()))
-        s = float(input('ΔS (saturation adjustment): '))
-        inference(path, v, r, s)
-    else:
-        print('Unknown mode')
+    edge_net = SimpleEdgeExtractor().
