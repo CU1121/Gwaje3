@@ -220,7 +220,7 @@ class SEBlock(nn.Module):
 
 
 class UNetConditionalModel(nn.Module):
-    def __init__(self, cond_dim=4, img_h: int = IMG_H, img_w: int = IMG_W):
+    def __init__(self, cond_dim=3, img_h: int = IMG_H, img_w: int = IMG_W):
         super().__init__()
         self.img_h = img_h
         self.img_w = img_w
