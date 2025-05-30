@@ -318,7 +318,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                     l_mse = mse(out, eh)
                     l_per = perc(out, eh)
                     l_lpips = lpips_loss(out, eh).mean()
-                    loss = l_mse*25 + l_per + l_lpips
+                    loss = l_mse*28 + l_per + l_lpips
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
@@ -328,7 +328,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 l_mse = mse(out, eh)
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
-                loss = l_mse*25 + l_per + l_lpips
+                loss = l_mse*28 + l_per + l_lpips
                 loss.backward()
                 opt.step()
 
@@ -360,7 +360,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
 
-                val_loss += (l_mse*25 + l_per + l_lpips).item()
+                val_loss += (l_mse*28 + l_per + l_lpips).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
@@ -382,6 +382,10 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             pat = 0
         else:
             pat += 1
+        if pat == 5:
+            lr/=2
+        if pat == 10:
+            lr/=2
         if pat > 15:
             print('Early stopping triggered')
             break
