@@ -15,8 +15,8 @@ from kornia.filters import Sobel  # Sobel 필터 추가
 # ====================================================
 # 글로벌 이미지 크기 설정 (H, W)
 # ====================================================
-IMG_H = 256  # height
-IMG_W = 256  # width
+IMG_H = 400  # height
+IMG_W = 600  # width
 
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
