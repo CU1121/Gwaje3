@@ -102,9 +102,9 @@ class ImprovedUNetConditionalModel(nn.Module):
         
         # Decoder with skip connections
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.dec3 = self._make_decoder_block(256 + 128 + 2, 128)
-        self.dec2 = self._make_decoder_block(128 + 64 + 2, 64)
-        self.dec1 = self._make_decoder_block(64 + 64 + 2, 64)
+        self.dec3 = self._make_decoder_block(256 + 256 + 1, 128)  # 256 (bottleneck) + 256 (enc3) + 1 (struct)
+        self.dec2 = self._make_decoder_block(128 + 128 + 1, 64)   # 128 (dec3) + 128 (enc2) + 1 (struct)
+        self.dec1 = self._make_decoder_block(64 + 64 + 1, 64)     # 64 (dec2) + 64 (enc1) + 1 (struct)
         
         # Final output
         self.final = nn.Sequential(
