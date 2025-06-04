@@ -511,9 +511,9 @@ def enhanced_train(low_dir, enh_dir, meta_file, epochs=100, batch_size=8, lr=1e-
                 residual = model(low_adjusted, cond, structure_map)
                 output = torch.clamp(low_adjusted + residual * 0.5, 0.0, 1.0)
                 
-                val_loss, _ = criterion(output, enh, mask)
+                val_loss, losseses = criterion(output, enh, mask)
                 total_val_loss += val_loss.item()
-                print(val_loss)
+                print(losseses)
                 val_psnr += enhanced_psnr(output, enh)
                 val_ssim += enhanced_ssim(output, enh)
         
