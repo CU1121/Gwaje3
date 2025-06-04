@@ -154,6 +154,10 @@ class ImprovedUNetConditionalModel(nn.Module):
         s_1 = F.interpolate(struct_map, scale_factor=0.25, mode='bilinear', align_corners=False)
         s_2 = F.interpolate(struct_map, scale_factor=0.5, mode='bilinear', align_corners=False)
         s_3 = struct_map
+
+        s_1 = s_1[:, :1, :, :]
+        s_2 = s_2[:, :1, :, :]
+        s_3 = s_3[:, :1, :, :]
         
         # Decoder path with skip connections
         d3 = self.dec3(torch.cat([self.up(bn), e3, s_1], dim=1))
