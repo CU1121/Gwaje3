@@ -360,9 +360,9 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                     hvi_local = rgb_to_hvi(local_out)
                     hvi_shift = hvi_local + delta.view(-1,3,1,1)
                     out_rgb   = hvi_to_rgb(hvi_shift)  
-                    l_mse = mse(out, eh)
-                    l_per = perc(out, eh)
-                    l_lpips = lpips_loss(out, eh).mean()
+                    l_mse = mse(out_rgb, eh)
+                    l_per = perc(out_rgb, eh)
+                    l_lpips = lpips_loss(out_rgb, eh).mean()
                     mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
                     loss = l_mse*28 + l_per + l_lpips + mean_loss
                 scaler.scale(loss).backward()
@@ -375,9 +375,9 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 hvi_local = rgb_to_hvi(local_out)
                 hvi_shift = hvi_local + delta.view(-1,3,1,1)
                 out_rgb   = hvi_to_rgb(hvi_shift)  
-                l_mse = mse(out, eh)
-                l_per = perc(out, eh)
-                l_lpips = lpips_loss(out, eh).mean()
+                l_mse = mse(out_rgb, eh)
+                l_per = perc(out_rgb, eh)
+                l_lpips = lpips_loss(out_rgb, eh).mean()
                 mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
                 loss = l_mse*28 + l_per + l_lpips + mean_loss
                 loss.backward()
@@ -411,16 +411,16 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 hvi_shift = hvi_local + delta.view(-1,3,1,1)
                 out_rgb   = hvi_to_rgb(hvi_shift)                    # 최종 출력
 
-                l_mse = mse(out, eh)
-                l_per = perc(out, eh)
-                l_lpips = lpips_loss(out, eh).mean()
+                l_mse = mse(out_rgb, eh)
+                l_per = perc(out_rgb, eh)
+                l_lpips = lpips_loss(out_rgb, eh).mean()
                 mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
 
                 val_loss += (l_mse*28 + l_per + l_lpips + mean_loss).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
-                psnr_eval += psnr(out, eh)
+                psnr_eval += psnr(out_rgb, eh)
                 hvi_eval += mean_loss.item()
 
         val_loss /= len(va)
