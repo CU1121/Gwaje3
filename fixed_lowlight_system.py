@@ -246,12 +246,12 @@ class EnhancedLossFunction(nn.Module):
         hf_loss = enhanced_multi_scale_loss(pred, target)
         
         # Weighted combination
-        total_loss = (mse_loss * 10 + 
-                     l1_loss * 5 +
-                     perceptual_loss * 2 +
-                     lpips_loss * 1 +
-                     color_loss * 3 +
-                     hf_loss * 2)
+        total_loss = (mse_loss * 1 + 
+                     l1_loss * 0.5 +
+                     perceptual_loss * 0.05 +
+                     lpips_loss * 0.1 +
+                     color_loss * 0.3 +
+                     hf_loss * 0.2)
         
         return total_loss, {
             'mse': mse_loss.item(),
