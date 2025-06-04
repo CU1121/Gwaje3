@@ -172,14 +172,21 @@ class ColorLoss(nn.Module):
         super().__init__()
         
     def forward(self, pred, target):
+        # Ensure input is in [0, 1] for conversion
+        pred = (pred + 1) / 2  # if pred is in [-1, 1]
+        target = (target + 1) / 2  # if target is in [-1, 1]
+        
         pred_lab = KC.rgb_to_lab(pred)
         target_lab = KC.rgb_to_lab(target)
         
-        # L channel loss (brightness)
-        l_loss = F.l1_loss(pred_lab[:, 0:1], target_lab[:, 0:1])
-        # AB channels loss (color)
-        ab_loss = F.l1_loss(pred_lab[:, 1:3], target_lab[:, 1:3])
+        # Optionally normalize LAB channels if needed
+        pred_lab[:, 0:1] = pred_lab[:, 0:1] / 100.0
+        pred_lab[:, 1:3] = (pred_lab[:, 1:3] + 128.0) / 255.0
+        target_lab[:, 0:1] = target_lab[:, 0:1] / 100.0
+        target_lab[:, 1:3] = (target_lab[:, 1:3] + 128.0) / 255.0
         
+        l_loss = F.l1_loss(pred_lab[:, 0:1], target_lab[:, 0:1])
+        ab_loss = F.l1_loss(pred_lab[:, 1:3], target_lab[:, 1:3])
         return l_loss + ab_loss * 0.5
 
 def enhanced_multi_scale_loss(pred, target, scales=[3, 5, 7], weights=[1.0, 0.5, 0.25]):
