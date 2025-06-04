@@ -626,9 +626,9 @@ def enhance_image(model, edge_model, image_path, condition, device):
 if __name__ == "__main__":
     # Training example
     train_losses, val_losses = enhanced_train(
-        low_dir="path/to/low_images",
-        enh_dir="path/to/enhanced_images", 
-        meta_file="path/to/metadata.json",
+        low_dir="../LOL_new/low",
+        enh_dir="../LOL_new/high",
+        meta_file="../LOL_new/high/metadata.json",
         epochs=100,
         batch_size=8,
         lr=1e-3
