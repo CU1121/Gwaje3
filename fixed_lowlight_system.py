@@ -513,7 +513,7 @@ def enhanced_train(low_dir, enh_dir, meta_file, epochs=100, batch_size=8, lr=1e-
                 
                 val_loss, _ = criterion(output, enh, mask)
                 total_val_loss += val_loss.item()
-                
+                print(val_loss)
                 val_psnr += enhanced_psnr(output, enh)
                 val_ssim += enhanced_ssim(output, enh)
         
