@@ -364,7 +364,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                     l_per = perc(out_rgb, eh)
                     l_lpips = lpips_loss(out_rgb, eh).mean()
                     mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
-                    loss = l_mse*28 + l_per + l_lpips + mean_loss
+                    loss = l_mse*28 + l_per + l_lpips + mean_loss*4
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
@@ -379,7 +379,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 l_per = perc(out_rgb, eh)
                 l_lpips = lpips_loss(out_rgb, eh).mean()
                 mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
-                loss = l_mse*28 + l_per + l_lpips + mean_loss
+                loss = l_mse*28 + l_per + l_lpips + mean_loss*4
                 loss.backward()
                 opt.step()
 
@@ -416,7 +416,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 l_lpips = lpips_loss(out_rgb, eh).mean()
                 mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
 
-                val_loss += (l_mse*28 + l_per + l_lpips + mean_loss).item()
+                val_loss += (l_mse*28 + l_per + l_lpips + mean_loss*4).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
