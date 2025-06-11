@@ -133,7 +133,7 @@ class ConditionalLowLightDataset(Dataset):
         base = enh.split('_')[0] + '.jpg'
         low_path = os.path.join(self.low_dir, base)
         enh_path = os.path.join(self.enh_dir, enh)
-                low = cv2.imread(low_path)
+        low = cv2.imread(low_path)
         enh_img = cv2.imread(enh_path)
         if low is None or enh_img is None:
             raise FileNotFoundError(f"로딩 실패: {low_path} 또는 {enh_path}")
