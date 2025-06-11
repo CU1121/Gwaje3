@@ -60,26 +60,6 @@ def psnr(x: torch.Tensor, y: torch.Tensor, max_val: float = 1.0):
     psnr = 10 * torch.log10(max_val**2 / (mse + 1e-8))
     return psnr.mean().item()
 
-# =========================================
-# HVI <-> RGB 변환
-# =========================================
-def rgb_to_hvi(img: torch.Tensor) -> torch.Tensor:      # [B,3,H,W], 0~1
-    hsv = KC.rgb_to_hsv(img)
-    h, s, v = hsv[:,0:1], hsv[:,1:2], hsv[:,2:3]
-    theta = h * 2 * np.pi
-    H = torch.cos(theta) * s
-    V = torch.sin(theta) * s
-    return torch.cat([H, V, v], dim=1)
-
-def hvi_to_rgb(hvi: torch.Tensor) -> torch.Tensor:      # [B,3,H,W]
-    H, V, I = hvi[:,0:1], hvi[:,1:2], hvi[:,2:3]
-    s = torch.clamp(torch.sqrt(H**2 + V**2), 0, 1)
-    theta = torch.atan2(V, H)
-    h = (theta % (2*np.pi)) / (2*np.pi)
-    hsv = torch.cat([h, s, I.clamp(0,1)], dim=1)
-    return KC.hsv_to_rgb(hsv).clamp(0,1)
-
-
 # ====================================================
 # 1. 메타데이터 생성
 # ====================================================
@@ -223,43 +203,22 @@ class UNetConditionalModel(nn.Module):
         self.dec2 = block(256+128+2,128)
         self.dec1 = block(128+64+2,64)
         self.final = nn.Conv2d(64,3,1)
-        self.shift_head = GlobalShiftHead(256, cond_dim)
 
 
     def forward(self, x, cond, struct_map):
-        bsz = x.size(0)
-        cm = self.cond_fc(cond).view(bsz,1,self.img_h,self.img_w)
-        x  = torch.cat([x, cm], dim=1)
-
+        b = x.size(0)
+        cm = self.cond_fc(cond).view(b,1,self.img_h,self.img_w)
+        x = torch.cat([x, cm], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
-        bn = self.bott(self.pool(e2))                # [B,256,H/4,W/4]
+        bn = self.bott(self.pool(e2))
 
-        # ----------------- 디코더 -----------------
         s_down1 = F.interpolate(struct_map, scale_factor=0.5, mode='bilinear', align_corners=False)
         s_down2 = struct_map
 
         d2 = self.dec2(torch.cat([self.up(bn), e2, s_down1], dim=1))
         d1 = self.dec1(torch.cat([self.up(d2), e1, s_down2], dim=1))
-        local_out = self.final(d1)                   # residual 맵
-
-        # -------- 전역 ΔHVI 예측 & 적용 -----------
-        feat_vec = bn.mean([2,3])                    # [B,256]
-        delta    = self.shift_head(feat_vec, cond)   # [B,3]
-        return local_out, delta
-
-class GlobalShiftHead(nn.Module):
-    """Bottleneck 특징 + 조건벡터 → ΔH, ΔV, ΔI  (전역 시프트)"""
-    def __init__(self, feat_ch: int, cond_dim: int = 3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(feat_ch + cond_dim, 128), nn.ReLU(),
-            nn.Linear(128, 3)                        # ΔH ΔV ΔI
-        )
-
-    def forward(self, feat_vec, cond_vec):
-        x = torch.cat([feat_vec, cond_vec], dim=1)
-        return self.net(x)                           # [B,3]
+        return self.final(d1)
 
 
 def laplacian(x):
@@ -354,39 +313,29 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
             if torch.cuda.is_available():
                 with torch.amp.autocast(device_type='cuda'):
-                    residual, delta = model(lo_bc, cs, struct_map)
-                    local_out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-
-                    hvi_local = rgb_to_hvi(local_out)
-                    hvi_shift = hvi_local + delta.view(-1,3,1,1)
-                    out_rgb   = hvi_to_rgb(hvi_shift)  
-                    l_mse = mse(out_rgb, eh)
-                    l_per = perc(out_rgb, eh)
-                    l_lpips = lpips_loss(out_rgb, eh).mean()
-                    mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
-                    loss = l_mse*28 + l_per + l_lpips + mean_loss*4
+                    residual = model(lo_bc, cs, struct_map)
+                    out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                    l_mse = mse(out, eh)
+                    l_per = perc(out, eh)
+                    l_lpips = lpips_loss(out, eh).mean()
+                    loss = l_mse*28 + l_per + l_lpips
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
             else:
-                residual, delta = model(lo_bc, cs, struct_map)
-                local_out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-
-                hvi_local = rgb_to_hvi(local_out)
-                hvi_shift = hvi_local + delta.view(-1,3,1,1)
-                out_rgb   = hvi_to_rgb(hvi_shift)  
-                l_mse = mse(out_rgb, eh)
-                l_per = perc(out_rgb, eh)
-                l_lpips = lpips_loss(out_rgb, eh).mean()
-                mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
-                loss = l_mse*28 + l_per + l_lpips + mean_loss*4
+                residual = model(lo_bc, cs, struct_map)
+                out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                l_mse = mse(out, eh)
+                l_per = perc(out, eh)
+                l_lpips = lpips_loss(out, eh).mean()
+                loss = l_mse*28 + l_per + l_lpips
                 loss.backward()
                 opt.step()
 
             total_loss += loss.item()
 
         model.eval()
-        val_loss = mse_loss = per_loss = lpips_eval = psnr_eval = hvi_eval = 0
+        val_loss = mse_loss = per_loss = lpips_eval = psnr_eval = 0
 
         with torch.no_grad():
             for lo, eh, cond, msk in va:
@@ -404,33 +353,26 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 learned_map = structure_model(lo_bc)
                 struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-                residual, delta = model(lo_bc, cs, struct_map)
-                local_out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                residual = model(lo_bc, cs, struct_map)
+                out = torch.clamp(lo_bc + residual, 0.0, 1.0)
 
-                hvi_local = rgb_to_hvi(local_out)
-                hvi_shift = hvi_local + delta.view(-1,3,1,1)
-                out_rgb   = hvi_to_rgb(hvi_shift)                    # 최종 출력
+                l_mse = mse(out, eh)
+                l_per = perc(out, eh)
+                l_lpips = lpips_loss(out, eh).mean()
 
-                l_mse = mse(out_rgb, eh)
-                l_per = perc(out_rgb, eh)
-                l_lpips = lpips_loss(out_rgb, eh).mean()
-                mean_loss = F.l1_loss(hvi_shift.mean([2,3]), rgb_to_hvi(eh).mean([2,3]))
-
-                val_loss += (l_mse*28 + l_per + l_lpips + mean_loss*4).item()
+                val_loss += (l_mse*28 + l_per + l_lpips).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
-                psnr_eval += psnr(out_rgb, eh)
-                hvi_eval += mean_loss.item()
+                psnr_eval += psnr(out, eh)
 
         val_loss /= len(va)
         mse_loss /= len(va)
         per_loss /= len(va)
         lpips_eval /= len(va)
         psnr_eval /= len(va)
-        hvi_eval /= len(va)
         print(f"Ep {e+1}/{epochs} Train:{total_loss/len(tr):.4f} Val:{val_loss:.4f}")
-        print(f"mse:{mse_loss:.4f} perc:{per_loss:.4f} lpips:{lpips_eval:.4f} hvi:{hvi_eval:.4f}")
+        print(f"mse:{mse_loss:.4f} perc:{per_loss:.4f} lpips:{lpips_eval:.4f}")
         print(f"psnr : {psnr_eval:.2f}dB")
 
         lr_scheduler.step(val_loss)
@@ -523,11 +465,8 @@ def inference(image_path, brightness, shifts):
         learned_map = structure_model(lo_bc)
         struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-        residual, delta = model(lo_bc, cs, struct_map)
-        local_out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-
-        hvi_out   = rgb_to_hvi(local_out) + delta.view(-1,3,1,1)
-        out_tensor = hvi_to_rgb(hvi_out).clamp(0,1)[0]       # [C,H,W]
+        residual   = model(lo_bc, cs, struct_map)
+        out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
 
     output_img = (out_tensor.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8)
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
