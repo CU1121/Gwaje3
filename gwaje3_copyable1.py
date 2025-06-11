@@ -1,6 +1,3 @@
-# ✅ gwaje3_ggyu_hvi_conditional.py
-# RGB_HVI 색공간 기반으로 조건(condition)에 HVI 평균 정보를 포함하는 버전
-
 import os
 import cv2
 import numpy as np
@@ -11,47 +8,9 @@ import torchvision.models as models
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch import nn, optim
 import torch.nn.functional as F
-import kornia.color as KC
-import lpips
-from kornia.filters import Sobel
-
-IMG_H = 400
-IMG_W = 600
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-pi = 3.141592653589793
-
-class RGB_HVI(nn.Module):
-    def __init__(self):
-        super(RGB_HVI, self).__init__()
-        self.density_k = torch.nn.Parameter(torch.full([1], 0.2))
-
-    def HVIT(self, img):
-        eps = 1e-8
-        device = img.device
-        dtypes = img.dtype
-        hue = torch.empty(img.shape[0], img.shape[2], img.shape[3], device=device, dtype=dtypes)
-        value = img.max(1)[0].to(dtypes)
-        img_min = img.min(1)[0].to(dtypes)
-        hue[img[:,2]==value] = 4.0 + ((img[:,0]-img[:,1]) / (value - img_min + eps))[img[:,2]==value]
-        hue[img[:,1]==value] = 2.0 + ((img[:,2]-img[:,0]) / (value - img_min + eps))[img[:,1]==value]
-        hue[img[:,0]==value] = (0.0 + ((img[:,1]-img[:,2]) / (value - img_min + eps))[img[:,0]==value]) % 6
-        hue[img_min==value] = 0.0
-        hue = hue / 6.0
-        saturation = (value - img_min) / (value + eps)
-        saturation[value==0] = 0
-        hue = hue.unsqueeze(1)
-        saturation = saturation.unsqueeze(1)
-        value = value.unsqueeze(1)
-        k = self.density_k
-        color_sensitive = ((value * 0.5 * pi).sin() + eps).pow(k)
-        ch = (2.0 * pi * hue).cos()
-        cv = (2.0 * pi * hue).sin()
-        H = color_sensitive * saturation * ch
-        V = color_sensitive * saturation * cv
-        I = value
-        return torch.cat([H, V, I], dim=1)
+import kornia.color as KC  # for LAB conversion
+import lpips  # ✅ LPIPS 추가
+from kornia.filters import Sobel  # Sobel 필터 추가
 
 # ====================================================
 # 글로벌 이미지 크기 설정 (H, W)
@@ -154,13 +113,17 @@ class ConditionalLowLightDataset(Dataset):
         self.low_dir = low_dir
         self.enh_dir = enh_dir
         self.low_files = sorted(os.listdir(low_dir))
-        self.enh_files = sorted([f for f in os.listdir(enh_dir) if not f.startswith('mask_')])
+        self.enh_files = sorted([
+            f for f in os.listdir(enh_dir)
+            if not f.startswith('mask_') and f.lower().endswith(('.jpg', '.png'))
+        ])
         with open(meta_file) as f:
             self.meta = json.load(f)
         self.transform = transform
         self.augment = augment
-        self.aug = T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)
-        self.hvi_module = RGB_HVI().to(device)
+        self.aug = T.Compose([
+            T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)
+        ])
 
     def __len__(self):
         return len(self.enh_files)
@@ -180,7 +143,6 @@ class ConditionalLowLightDataset(Dataset):
 
         low_rgb = cv2.cvtColor(low, cv2.COLOR_BGR2RGB)
         enh_rgb = cv2.cvtColor(enh_img, cv2.COLOR_BGR2RGB)
-
         if self.transform:
             low_t = self.transform(low_rgb).to(device)
             enh_t = self.transform(enh_rgb).to(device)
@@ -193,14 +155,16 @@ class ConditionalLowLightDataset(Dataset):
         if mask is None:
             m = np.ones((IMG_H, IMG_W), dtype=np.float32)
         else:
-            m = cv2.resize(mask, (IMG_W, IMG_H)).astype(np.float32) / 255.0
+            try:
+                m = cv2.resize(mask, (IMG_W, IMG_H)).astype(np.float32) / 255.0
+            except cv2.error:
+                m = np.ones((IMG_H, IMG_W), dtype=np.float32)
         m_t = torch.tensor(m, dtype=torch.float32).unsqueeze(0).to(device)
 
         md = self.meta[enh]
         brightness = md['brightness'] / 255.0
-        hvi_feat = self.hvi_module.HVIT(low_t.unsqueeze(0))[0]  # [3,H,W]
-        mean_hvi = hvi_feat.mean(dim=[1,2])                     # [3]
-        cond = torch.cat([torch.tensor([brightness], device=device), mean_hvi], dim=0)  # [4]
+        color_shifts = [c / 255.0 for c in md['color_shift']]
+        cond = torch.tensor([brightness] + color_shifts, dtype=torch.float32).to(device)
 
         return low_t, enh_t, cond, m_t
 
@@ -354,7 +318,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                     l_mse = mse(out, eh)
                     l_per = perc(out, eh)
                     l_lpips = lpips_loss(out, eh).mean()
-                    loss = l_mse*18 + l_per + l_lpips
+                    loss = l_mse*28 + l_per + l_lpips
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
@@ -364,7 +328,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 l_mse = mse(out, eh)
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
-                loss = l_mse*18 + l_per + l_lpips
+                loss = l_mse*28 + l_per + l_lpips
                 loss.backward()
                 opt.step()
 
@@ -396,7 +360,7 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
 
-                val_loss += (l_mse*18 + l_per + l_lpips).item()
+                val_loss += (l_mse*28 + l_per + l_lpips).item()
                 mse_loss += l_mse.item()
                 per_loss += l_per.item()
                 lpips_eval += l_lpips.item()
@@ -418,6 +382,10 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             pat = 0
         else:
             pat += 1
+        if pat == 5:
+            lr/=2
+        if pat == 10:
+            lr/=2
         if pat > 15:
             print('Early stopping triggered')
             break
@@ -482,7 +450,7 @@ def inference(image_path, brightness, shifts):
     lo_b = KC.hsv_to_rgb(lo_hsv)
     lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
 
-    model = UNetConditionalModel(cond_dim=4, img_h=IMG_H, img_w=IMG_W).to(device)
+    model = UNetConditionalModel(cond_dim=3, img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
     sobel = Sobel().to(device)
 
