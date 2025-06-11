@@ -133,11 +133,8 @@ class ConditionalLowLightDataset(Dataset):
         base = enh.split('_')[0] + '.jpg'
         low_path = os.path.join(self.low_dir, base)
         enh_path = os.path.join(self.enh_dir, enh)
-        mask_path = os.path.join(self.enh_dir, f"mask_{enh}")
-
-        low = cv2.imread(low_path)
+                low = cv2.imread(low_path)
         enh_img = cv2.imread(enh_path)
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if low is None or enh_img is None:
             raise FileNotFoundError(f"로딩 실패: {low_path} 또는 {enh_path}")
 
@@ -152,14 +149,7 @@ class ConditionalLowLightDataset(Dataset):
         if self.augment:
             low_t = self.aug(low_t)
 
-        if mask is None:
-            m = np.ones((IMG_H, IMG_W), dtype=np.float32)
-        else:
-            try:
-                m = cv2.resize(mask, (IMG_W, IMG_H)).astype(np.float32) / 255.0
-            except cv2.error:
-                m = np.ones((IMG_H, IMG_W), dtype=np.float32)
-        m_t = torch.tensor(m, dtype=torch.float32).unsqueeze(0).to(device)
+        m_t = None  # mask 제거: 글로벌 입력으로 변경
 
         md = self.meta[enh]
         brightness = md['brightness'] / 255.0
@@ -300,9 +290,9 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
 
             lo_hsv = KC.rgb_to_hsv(lo)
-            lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
+            lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1), 0.0, 1.0)
             lo_b = KC.hsv_to_rgb(lo_hsv)
-            lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
+            lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1), 0.0, 1.0)
 
             opt.zero_grad()
 
@@ -416,17 +406,7 @@ def inference(image_path, brightness, shifts):
     global temp_sel, mask_sel, draw_flag
 
     image = cv2.imread(image_path)
-    temp_sel = image.copy()
-    mask_sel = np.zeros(image.shape[:2], dtype=np.uint8)
-    draw_flag = False
 
-    cv2.namedWindow("영역 선택 (q: 완료)")
-    cv2.setMouseCallback("영역 선택 (q: 완료)", draw_sel)
-    while True:
-        cv2.imshow("영역 선택 (q: 완료)", temp_sel)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    cv2.destroyAllWindows()
 
     transform = T.Compose([
         T.ToPILImage(),
@@ -438,17 +418,14 @@ def inference(image_path, brightness, shifts):
     cond = [brightness/255.0] + [s/255.0 for s in shifts]
     condition_tensor = torch.tensor([cond], dtype=torch.float32).to(device)
 
-    mask_resized = cv2.resize(mask_sel, (input_tensor.shape[3], input_tensor.shape[2]))
-    mask_tensor = (torch.from_numpy(mask_resized.astype(np.float32) / 255.0)
-                   .unsqueeze(0).unsqueeze(0).to(device))
-
     b  = condition_tensor[:, :1]
     cs = condition_tensor[:, 1:]
 
     lo_hsv = KC.rgb_to_hsv(input_tensor)
-    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor, 0.0, 1.0)
+    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1), 0.0, 1.0)
     lo_b = KC.hsv_to_rgb(lo_hsv)
-    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
+    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1), 0.0, 1.0)
+
 
     model = UNetConditionalModel(cond_dim=3, img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
@@ -470,11 +447,9 @@ def inference(image_path, brightness, shifts):
 
     output_img = (out_tensor.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8)
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
-    mask_full  = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
-    mask_3ch   = np.stack([mask_full]*3, axis=2)
-    result     = np.where(mask_3ch==255, output_bgr, image)
 
-    cv2.imshow("AI 보정 결과", result)
+    cv2.imshow("AI 보정 결과", output_bgr)
+
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
