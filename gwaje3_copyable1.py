@@ -18,6 +18,17 @@ from kornia.filters import Sobel  # Sobel 필터 추가
 IMG_H = 400  # height
 IMG_W = 600  # width
 
+def structure_weighted_l1_loss(output, target, structure_map, alpha=1.0, beta=0.1):
+    """
+    구조 map 기반 가중치 적용된 L1 손실
+    alpha: 구조가 있는 영역의 가중치
+    beta : 평탄한 영역의 가중치
+    """
+    with torch.no_grad():
+        weights = alpha * structure_map + beta * (1.0 - structure_map)
+    return F.l1_loss(output * weights, target * weights)
+
+
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
         super().__init__()
@@ -301,12 +312,14 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
             sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
             learned_map = structure_model(lo_bc)
             struct_map = torch.cat([sobel_map, learned_map], dim=1)
+            structure_strength = struct_map.norm(dim=1, keepdim=True)  # shape: (B, 1, H, W)
+            structure_strength = structure_strength / (structure_strength.max() + 1e-8)
 
             if torch.cuda.is_available():
                 with torch.amp.autocast(device_type='cuda'):
                     residual = model(lo_bc, cs, struct_map)
                     out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                    l_mse = mse(out, eh)
+                    l_mse = structure_weighted_l1_loss(out, eh, structure_strength)
                     l_per = perc(out, eh)
                     l_lpips = lpips_loss(out, eh).mean()
                     loss = l_mse*28 + l_per + l_lpips
@@ -346,8 +359,9 @@ def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
 
                 residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-
-                l_mse = mse(out, eh)
+                structure_strength = struct_map.norm(dim=1, keepdim=True)
+                structure_strength = structure_strength / (structure_strength.max() + 1e-8)
+                l_mse = structure_weighted_l1_loss(out, eh, structure_strength)
                 l_per = perc(out, eh)
                 l_lpips = lpips_loss(out, eh).mean()
 
