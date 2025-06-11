@@ -149,7 +149,8 @@ class ConditionalLowLightDataset(Dataset):
         if self.augment:
             low_t = self.aug(low_t)
 
-        m_t = None  # mask 제거: 글로벌 입력으로 변경
+        # 현재는 글로벌 입력이므로 mask는 all-one
+        m_t = torch.ones((1, IMG_H, IMG_W), dtype=torch.float32).to(device)
 
         md = self.meta[enh]
         brightness = md['brightness'] / 255.0
