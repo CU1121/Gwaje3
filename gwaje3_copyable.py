@@ -17,7 +17,7 @@ from kornia.filters import Sobel  # Sobel 필터 추가
 # ====================================================
 IMG_H = 400  # height
 IMG_W = 600  # width
-torch.cuda.empty.cache() 
+torch.cuda.empty_cache() 
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
         super().__init__()
