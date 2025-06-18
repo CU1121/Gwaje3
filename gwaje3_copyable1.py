@@ -356,7 +356,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
             learned_map = structure_model(lo_bc)
             struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-            local_input = torch.stack([mask[:, 0, :, :]] * 3, dim=1)  # (B,3,H,W)
+            local_input = mask[:, :1, :, :].repeat(1, 3, 1, 1)
             with torch.amp.autocast(device_type='cuda'):
                 residual = model(lo_bc, cond, local_input)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
