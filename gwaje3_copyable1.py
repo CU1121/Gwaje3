@@ -342,9 +342,11 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
     for epoch in range(epochs):
+        psnr_train_eval = 0
         model.train()
         total_loss = 0
         for lo, eh, cond, mask, local_input in tqdm(train_loader, desc=f"[Epoch {epoch+1}]"):
+            psnr_batch = 0
             lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
             b  = cond[:, :1]
             cs = cond[:, 1:]
@@ -380,6 +382,9 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
             scaler.step(optimizer)
             scaler.update()
             total_loss += loss.item()
+            psnr_batch = psnr(out, eh)
+            psnr_train_eval += psnr_batch
+
 
         # 검증
         model.eval()
@@ -430,6 +435,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
         local_loss /= len(val_loader)
         print(f"[Epoch {epoch+1}] Loss: {total_loss/len(train_loader):.4f} | Val: {val_loss:.4f} | PSNR: {psnr_eval:.2f}dB")
         print(f" mse : {mse_loss}, perc : {perc_loss}, lp : {lp_loss}, global : {global_loss}, local : {local_loss}")
+        print(f" Val PSNR: {psnr_eval:.2f}dB")
 
         lr_scheduler.step(val_loss)
 
