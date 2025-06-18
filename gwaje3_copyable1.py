@@ -372,8 +372,6 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 edge_loss = F.l1_loss(sobel_map, target_sobel)
             
                 loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 3.0 * edge_loss
-                mask_rgb = mask[:, :1, :, :].expand_as(out)
-                loss_local = 90 * ((out - eh) ** 2 * mask_rgb).mean()
                 mask_rgb = mask[:, :1, :, :].expand_as(out)  # (B,1,H,W) → (B,3,H,W)
                 loss_local = 90 * ((out - eh) ** 2 * mask_rgb).mean()
                 loss = loss_global + loss_local
@@ -388,7 +386,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
 
         # 검증
         model.eval()
-        mse_loss, perc_loss, lp_loss = 0, 0, 0
+        mse_loss, perc_loss, lp_loss, ed_loss = 0, 0, 0, 0
         val_loss, psnr_eval = 0, 0
         global_loss, local_loss = 0, 0
         with torch.no_grad():
@@ -408,15 +406,23 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 residual = model(lo_bc, cond, local_input)
 
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
+                gray = KC.rgb_to_grayscale(out)
+                sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
+                #  Sobel 기반 경계 손실 계산
+                target_gray = KC.rgb_to_grayscale(eh)
+                target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
+                edge_loss = F.l1_loss(sobel_map, target_sobel)
 
                 m = mse(out,eh)
                 p = perc(out,eh)
                 l = lpips_loss(out,eh).mean()
+                e = F.l1_loss(sobel_map, target_sobel)
 
-                loss_global = 30 * m + 1.5 * p + 1.5 * l
+                loss_global = 30 * m + 1.5 * p + 1.5 * l + 3 * e
                 mse_loss += m
                 perc_loss += p
                 lp_loss += l
+                ed_loss += e
                 
                 loss_local = 90 * ((out - eh) ** 2 * mask).mean()
                 loss = loss_global + loss_local
@@ -431,10 +437,11 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
         mse_loss /= len(val_loader)
         perc_loss /= len(val_loader)
         lp_loss /= len(val_loader)
+        ed_loss /= len(val_loader)
         global_loss /= len(val_loader)
         local_loss /= len(val_loader)
         print(f"[Epoch {epoch+1}] Loss: {total_loss/len(train_loader):.4f} | Val: {val_loss:.4f} | PSNR: {psnr_eval:.2f}dB")
-        print(f" mse : {mse_loss}, perc : {perc_loss}, lp : {lp_loss}, global : {global_loss}, local : {local_loss}")
+        print(f" mse : {mse_loss}, perc : {perc_loss}, lp : {lp_loss}, global : {global_loss}, local : {local_loss}, edge : {ed_loss}")
         print(f" Val PSNR: {psnr_eval:.2f}dB")
 
         lr_scheduler.step(val_loss)
