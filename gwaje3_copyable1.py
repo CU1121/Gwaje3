@@ -19,7 +19,7 @@ IMG_H = 400  # height
 IMG_W = 600  # width
 
 class SimpleEdgeExtractor(nn.Module):
-    def __init__(self, in_ch=3):
+    def __init__(self, in_ch=3, out_ch=8):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, 32, 3, padding=1), nn.ReLU(),
