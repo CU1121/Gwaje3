@@ -205,7 +205,8 @@ class LocalInputModule(nn.Module):
     def __init__(self, in_ch=3, out_ch=256):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.ReLU()
+            nn.Conv2d(in_ch, 64, 3, stride=2, padding=1), nn.ReLU(),  # ↓ H/2
+            nn.Conv2d(64, out_ch, 3, stride=2, padding=1), nn.ReLU()  # ↓ H/4
         )
     def forward(self, x):
         return self.conv(x)
