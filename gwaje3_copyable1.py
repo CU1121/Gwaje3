@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import json
 import torch
+torch.cuda.empty.cache()
 import torchvision.transforms as T
 import torchvision.models as models
 from torch.utils.data import Dataset, DataLoader, random_split
