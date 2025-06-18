@@ -232,11 +232,11 @@ class UNetConditionalModel(nn.Module):
         self.local_cnn = LocalInputModule(in_ch=local_ch, out_ch=256)
 
         self.enc1 = block(img_ch, 64)
-        self.enc2 = block(64, 128)
+        self.enc2 = block(64, 256)
         self.pool = nn.MaxPool2d(2)
-        self.bott = block(128, 256)
+        self.bott = block(256, 256)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.dec2 = block(256 + 128, 128)
+        self.dec2 = block(256 + 256, 128)
         self.dec1 = block(128 + 64, 64)
         self.final = nn.Conv2d(64, 3, 1)
 
