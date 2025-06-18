@@ -356,7 +356,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
             learned_map = structure_model(lo_bc)
             struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-            local_input = mask[:, :1, :, :].repeat(1, 3, 1, 1)
+            local_input = struct_map
             with torch.amp.autocast(device_type='cuda'):
                 residual = model(lo_bc, cond, local_input)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
@@ -396,7 +396,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
                 learned_map = structure_model(lo_bc)
                 cond = torch.cat([b, cs], dim=1)  # cond: (B, 4)
-                local_input = mask.repeat(1, 3, 1, 1)  # (B,3,H,W)
+                local_input = torch.cat([sobel_map, learned_map], dim=1)  # (B,3,H,W)
                 residual = model(lo_bc, cond, local_input)
 
                 residual = model(lo_bc, cond, local_input)
@@ -514,8 +514,10 @@ def inference(image_path, brightness, shifts):
     sobel.eval()
 
     with torch.no_grad():
-        local_input_tensor = mask_tensor.repeat(1, 3, 1, 1)  # shape: (1,3,H,W)
-
+        gray = KC.rgb_to_grayscale(lo_bc)
+        sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
+        learned_map = structure_model(lo_bc)
+        local_input_tensor = torch.cat([sobel_map, learned_map], dim=1)  # (1,9,H,W)
         
         residual = model(lo_bc, condition_tensor, local_input_tensor)
         out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
