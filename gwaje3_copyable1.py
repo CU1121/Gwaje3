@@ -341,9 +341,11 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
 
             # Global 조정 (mask 제한 적용)
             lo_hsv = KC.rgb_to_hsv(lo)
-            lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask, 0.0, 1.0)
+            mask_1ch = mask[:, :1, :, :]
+            lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask_1ch, 0.0, 1.0)
             lo_b = KC.hsv_to_rgb(lo_hsv)
-            lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask, 0.0, 1.0)
+            lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask_1ch, 0.0, 1.0)
+
 
             optimizer.zero_grad()
             gray = KC.rgb_to_grayscale(lo_bc)
@@ -382,9 +384,10 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 cs = cond[:, 1:]
 
                 lo_hsv = KC.rgb_to_hsv(lo)
-                lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask, 0.0, 1.0)
+                mask_1ch = mask[:, :1, :, :]
+                lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask_1ch, 0.0, 1.0)
                 lo_b = KC.hsv_to_rgb(lo_hsv)
-                lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask, 0.0, 1.0)
+                lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask_1ch, 0.0, 1.0)
 
                 gray = KC.rgb_to_grayscale(lo_bc)
                 sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
