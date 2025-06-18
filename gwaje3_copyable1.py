@@ -17,7 +17,7 @@ from kornia.filters import Sobel  # Sobel 필터 추가
 # ====================================================
 IMG_H = 400  # height
 IMG_W = 600  # width
-
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3, out_ch=8):
