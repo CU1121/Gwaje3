@@ -506,7 +506,7 @@ def draw_sel(event, x, y, flags, param):
         draw_flag = False
 
 
-def inference(image_path, brightness, shifts):
+def inference(image_path, brightness, shifts, local_brightness=0.0):
     global temp_sel, mask_sel, draw_flag
 
     image = cv2.imread(image_path)
@@ -521,6 +521,7 @@ def inference(image_path, brightness, shifts):
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     cv2.destroyAllWindows()
+    local_brightness = float(input("Local 밝기 조정값을 입력하세요 (0~255): "))
 
     transform = T.Compose([
         T.ToPILImage(),
@@ -543,6 +544,10 @@ def inference(image_path, brightness, shifts):
     lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor, 0.0, 1.0)
     lo_b = KC.hsv_to_rgb(lo_hsv)
     lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
+    if local_brightness != 0.0:
+        lo_hsv_local = KC.rgb_to_hsv(lo_bc.clone())
+        lo_hsv_local[:,2:3,:,:] = torch.clamp(lo_hsv_local[:,2:3,:,:] + (local_brightness / 255.0) * mask_tensor, 0.0, 1.0)
+        lo_bc = KC.hsv_to_rgb(lo_hsv_local)
 
     model = UNetConditionalModel(cond_dim=4, img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
