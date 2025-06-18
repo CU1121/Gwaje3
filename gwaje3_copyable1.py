@@ -246,14 +246,16 @@ class UNetConditionalModel(nn.Module):
         e2 = self.enc2(self.pool(e1))
     
         # Global MLP
+        e2_pooled = self.pool(e2)
         g_feat = self.global_mlp(cond)           # (B,256,1,1)
-        g_feat = g_feat.expand(-1, -1, e2.shape[2], e2.shape[3])  # expand to match spatial size
+        g_feat = g_feat.expand(-1, -1, e2_pooled.shape[2], e2_pooled.shape[3])  # ✅ (B,256,100,150)
+
     
         # Local CNN
         l_feat = self.local_cnn(local_input)     # (B,256,H/4,W/4)
     
         # Bottleneck
-        bn_input = self.pool(e2) + g_feat + l_feat
+        bn_input = e2_pooled + g_feat + l_feat
         bn = self.bott(bn_input)
     
         # Decoder
