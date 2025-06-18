@@ -202,7 +202,7 @@ class GlobalInputModule(nn.Module):
         return self.mlp(cond).unsqueeze(2).unsqueeze(3)
 
 class LocalInputModule(nn.Module):
-    def __init__(self, in_ch=3, out_ch=256):
+    def __init__(self, in_ch=9, out_ch=256):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, 64, 3, stride=2, padding=1), nn.ReLU(),  # ↓ H/2
