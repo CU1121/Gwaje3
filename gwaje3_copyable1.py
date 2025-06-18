@@ -371,7 +371,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
                 edge_loss = F.l1_loss(sobel_map, target_sobel)
             
-                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 3.0 * edge_loss
+                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 30 * edge_loss
                 mask_rgb = mask[:, :1, :, :].expand_as(out)  # (B,1,H,W) → (B,3,H,W)
                 loss_local = 90 * ((out - eh) ** 2 * mask_rgb).mean()
                 loss = loss_global + loss_local
@@ -418,7 +418,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 l = lpips_loss(out,eh).mean()
                 e = F.l1_loss(sobel_map, target_sobel)
 
-                loss_global = 30 * m + 1.5 * p + 1.5 * l + 3 * e
+                loss_global = 30 * m + 1.5 * p + 1.5 * l + 30 * e
                 mse_loss += m
                 perc_loss += p
                 lp_loss += l
