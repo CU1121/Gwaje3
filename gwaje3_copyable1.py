@@ -603,7 +603,7 @@ def inference(image_path, brightness, shifts, local_brightness=0.0):
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
     mask_full  = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
     mask_3ch   = np.stack([mask_full]*3, axis=2)
-    result     = np.where(mask_3ch==255, output_bgr, image)
+    result     = output_bgr
 
     cv2.imshow("AI 보정 결과", result)
     cv2.waitKey(0)
