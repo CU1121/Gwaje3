@@ -367,13 +367,15 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 residual = model(lo_bc, cond, local_input)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
             
-                # ✅ Sobel 기반 경계 손실 계산
+                #  Sobel 기반 경계 손실 계산
                 target_gray = KC.rgb_to_grayscale(eh)
                 target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
                 edge_loss = F.l1_loss(sobel_map, target_sobel)
             
                 loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 3.0 * edge_loss
-                loss_local = 90 * ((out - eh) ** 2 * mask).mean()
+                mask_rgb = mask[:, :1, :, :]  # 또는 mask.mean(dim=1, keepdim=True)
+                mask_rgb = mask_rgb.expand_as(out)
+                loss_local = 90 * ((out - eh) ** 2 * mask_rgb).mean()
                 loss = loss_global + loss_local
 
             scaler.scale(loss).backward()
