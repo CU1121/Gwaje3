@@ -353,12 +353,18 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
             b  = cond[:, :1]
             cs = cond[:, 1:]
 
-            # Global 조정 (mask 제한 적용)
+            # 1. 전체에 Global 조건 먼저 적용
             lo_hsv = KC.rgb_to_hsv(lo)
-            mask_1ch = mask[:, :1, :, :]
-            lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask_1ch, 0.0, 1.0)
+            lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1), 0.0, 1.0)
             lo_b = KC.hsv_to_rgb(lo_hsv)
-            lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask_1ch, 0.0, 1.0)
+            lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1), 0.0, 1.0)
+            
+            # 2. 이후 Local 조건을 mask 영역에만 추가 적용
+            if has_local:
+                lo_hsv = KC.rgb_to_hsv(lo_bc)
+                lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask[:, :1, :, :], 0.0, 1.0)
+                lo_b = KC.hsv_to_rgb(lo_hsv)
+                lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask, 0.0, 1.0)
 
 
             optimizer.zero_grad()
@@ -423,11 +429,21 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 b = cond[:, :1]
                 cs = cond[:, 1:]
 
+                # 1. Global condition은 전체에 적용
                 lo_hsv = KC.rgb_to_hsv(lo)
-                mask_1ch = mask[:, :1, :, :]
-                lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask_1ch, 0.0, 1.0)
+                lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1), 0.0, 1.0)
                 lo_b = KC.hsv_to_rgb(lo_hsv)
-                lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask_1ch, 0.0, 1.0)
+                lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1), 0.0, 1.0)
+                
+                # 2. Local condition이 존재하면 마스크된 영역에 추가 적용
+                if has_local:
+                    lo_hsv = KC.rgb_to_hsv(lo_bc)
+                    lo_hsv[:, 2:3, :, :] = torch.clamp(
+                        lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask[:, :1, :, :], 0.0, 1.0
+                    )
+                    lo_b = KC.hsv_to_rgb(lo_hsv)
+                    lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask, 0.0, 1.0)
+
 
                 residual = model(lo_bc, cond, local_input)
 
@@ -545,14 +561,25 @@ def inference(image_path, brightness, shifts, local_brightness=0.0):
     b  = condition_tensor[:, :1]
     cs = condition_tensor[:, 1:]
 
+    # Global 전체 적용
     lo_hsv = KC.rgb_to_hsv(input_tensor)
-    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor, 0.0, 1.0)
+    lo_hsv[:, 2:3, :, :] = torch.clamp(
+        lo_hsv[:, 2:3, :, :] + brightness / 255.0, 0.0, 1.0
+    )
     lo_b = KC.hsv_to_rgb(lo_hsv)
-    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
+    lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1), 0.0, 1.0)
+    
+    # Local 적용 시 마스크 영역만 다시 조정
     if local_brightness != 0.0:
         lo_hsv_local = KC.rgb_to_hsv(lo_bc.clone())
-        lo_hsv_local[:,2:3,:,:] = torch.clamp(lo_hsv_local[:,2:3,:,:] + (local_brightness / 255.0) * mask_tensor, 0.0, 1.0)
-        lo_bc = KC.hsv_to_rgb(lo_hsv_local)
+        lo_hsv_local[:, 2:3, :, :] = torch.clamp(
+            lo_hsv_local[:, 2:3, :, :] + (local_brightness / 255.0) * mask_tensor, 0.0, 1.0
+        )
+        lo_b_local = KC.hsv_to_rgb(lo_hsv_local)
+        lo_bc = torch.clamp(
+            lo_b_local + cs.view(-1, 3, 1, 1) * mask_tensor, 0.0, 1.0
+        )
+
 
     model = UNetConditionalModel(cond_dim=4, img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
