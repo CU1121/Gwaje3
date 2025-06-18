@@ -345,7 +345,9 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
 
         # 검증
         model.eval()
+        mse_loss, perc_loss, lp_loss = 0, 0, 0
         val_loss, psnr_eval = 0, 0
+        global_loss, local_loss = 0, 0
         with torch.no_grad():
             for lo, eh, cond, mask in val_loader:
                 lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
@@ -365,16 +367,32 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
 
-                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + lpips_loss(out, eh).mean()
+                m = mse(out,eh)
+                p = perc(out,eh)
+                l = lpips_loss(out,eh).mean()
+
+                loss_global = 30 * m + 1.5 * p + l
+                mse_loss += m
+                perc_loss += p
+                lp_loss += l
+                
                 loss_local = 10 * ((out - eh) ** 2 * mask).mean()
                 loss = loss_global + loss_local
+                global_loss += loss_global
+                local_loss += loss_local
 
                 val_loss += loss.item()
                 psnr_eval += psnr(out, eh)
 
         val_loss /= len(val_loader)
         psnr_eval /= len(val_loader)
+        mse_loss /= len(val_loader)
+        perc_loss /= len(val_loader)
+        lp_loss /= len(val_loader)
+        global_loss /= len(val_loader)
+        local_loss /= len(val_loader)
         print(f"[Epoch {epoch+1}] Loss: {total_loss/len(train_loader):.4f} | Val: {val_loss:.4f} | PSNR: {psnr_eval:.2f}dB")
+        print(f" mse : {mse_loss}, perc : {perc_loss}, lp : {lp_loss}, global : {global_loss}, local : {local_loss}")
 
         lr_scheduler.step(val_loss)
 
