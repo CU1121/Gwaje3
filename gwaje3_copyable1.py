@@ -371,10 +371,36 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
                 edge_loss = F.l1_loss(sobel_map, target_sobel)
             
-                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 30 * edge_loss
-                mask_rgb = mask[:, :1, :, :].expand_as(out)  # (B,1,H,W) → (B,3,H,W)
-                loss_local = 90 * ((out - eh) ** 2 * mask_rgb).mean()
-                loss = loss_global + loss_local
+                # Global 손실 구성
+                mse_g = mse(out, eh)
+                perc_g = perc(out, eh)
+                lpips_g = lpips_loss(out, eh).mean()
+                edge_g = edge_consistency_loss(out, eh, sobel)
+                loss_global = 30 * mse_g + 1.5 * perc_g + 1.5 * lpips_g + 30 * edge_g
+                
+                # Local 손실 구성
+                mask_rgb = mask.expand_as(out)  # (B,1,H,W) → (B,3,H,W)
+                out_mask = out * mask_rgb
+                eh_mask = eh * mask_rgb
+                mse_l = mse(out_mask, eh_mask)
+                perc_l = perc(out_mask, eh_mask)
+                lpips_l = lpips_loss(out_mask, eh_mask).mean()
+                edge_l = edge_consistency_loss(out_mask, eh_mask, sobel)
+                loss_local = 30 * mse_l + 1.5 * perc_l + 1.5 * lpips_l + 30 * edge_l
+                
+                # 조건 분기
+                has_global = True
+                has_local = (mask.sum() > 0).item()
+                
+                if has_global and has_local:
+                    loss = loss_global + loss_local
+                elif has_global:
+                    loss = loss_global
+                elif has_local:
+                    loss = loss_local
+                else:
+                    loss = mse(out, eh)  # fallback
+
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
