@@ -182,7 +182,8 @@ class ConditionalLowLightDataset(Dataset):
         with torch.no_grad():
             learned_map = structure_model(low_t_for_struct)
         local_t = torch.cat([sobel_map, learned_map], dim=1).squeeze(0).to(device)  # (9,H,W)
-        return low_t, enh_t, cond, m_t, local_t
+        has_local = (m_t.sum().item() > 0.0)
+        return low_t, enh_t, cond, m_t, local_t, has_local
 
 
 # ====================================================
@@ -345,7 +346,8 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
         psnr_train_eval = 0
         model.train()
         total_loss = 0
-        for lo, eh, cond, mask, local_input in tqdm(train_loader, desc=f"[Epoch {epoch+1}]"):
+        for lo, eh, cond, mask, local_input, has_local in tqdm(train_loader, desc=f"[Epoch {epoch+1}]"):
+:
             psnr_batch = 0
             lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
             b  = cond[:, :1]
@@ -416,7 +418,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
         val_loss, psnr_eval = 0, 0
         global_loss, local_loss = 0, 0
         with torch.no_grad():
-            for lo, eh, cond, mask, local_input  in val_loader:
+            for lo, eh, cond, mask, local_input, has_local in val_loader:
                 lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
                 b = cond[:, :1]
                 cs = cond[:, 1:]
@@ -451,7 +453,10 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 ed_loss += e
                 
                 loss_local = 90 * ((out - eh) ** 2 * mask).mean()
-                loss = loss_global + loss_local
+                if has_local:
+                    loss = loss_global + loss_local
+                else:
+                    loss = loss_global
                 global_loss += loss_global
                 local_loss += loss_local
 
