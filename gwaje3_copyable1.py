@@ -22,8 +22,8 @@ class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, 16, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(16, 1, 3, padding=1), nn.Sigmoid()
+            nn.Conv2d(in_ch, 32, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(32, out_ch, 3, padding=1), nn.Sigmoid()
         )
     def forward(self, x):
         return self.net(x)
