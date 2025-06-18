@@ -334,8 +334,8 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
 
-                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + lpips_loss(out, eh).mean()
-                loss_local = 10 * ((out - eh) ** 2 * mask).mean()
+                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5* lpips_loss(out, eh).mean()
+                loss_local = 90 * ((out - eh) ** 2 * mask).mean()
                 loss = loss_global + loss_local
 
             scaler.scale(loss).backward()
@@ -371,12 +371,12 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 p = perc(out,eh)
                 l = lpips_loss(out,eh).mean()
 
-                loss_global = 30 * m + 1.5 * p + l
+                loss_global = 30 * m + 1.5 * p + 1.5 * l
                 mse_loss += m
                 perc_loss += p
                 lp_loss += l
                 
-                loss_local = 10 * ((out - eh) ** 2 * mask).mean()
+                loss_local = 90 * ((out - eh) ** 2 * mask).mean()
                 loss = loss_global + loss_local
                 global_loss += loss_global
                 local_loss += loss_local
