@@ -173,9 +173,15 @@ class ConditionalLowLightDataset(Dataset):
         brightness = md['brightness'] / 255.0
         color_shifts = [c / 255.0 for c in md['color_shift']]
         cond = torch.tensor([brightness] + color_shifts, dtype=torch.float32).to(device)
-
-        local_map = np.stack([m]*3, axis=0)  # (3, H, W)
-        local_t = torch.tensor(local_map, dtype=torch.float32).to(device)
+        
+        low_t_for_struct = low_t.unsqueeze(0) if low_t.dim() == 3 else low_t  # (1,3,H,W)
+        gray = KC.rgb_to_grayscale(low_t_for_struct)
+        sobel_map = torch.norm(Sobel().to(device)(gray), dim=1, keepdim=True)
+        structure_model = SimpleEdgeExtractor().to(device)
+        structure_model.eval()
+        with torch.no_grad():
+            learned_map = structure_model(low_t_for_struct)
+        local_t = torch.cat([sobel_map, learned_map], dim=1).squeeze(0).to(device)  # (9,H,W)
         return low_t, enh_t, cond, local_t
 
 # ====================================================
