@@ -28,6 +28,14 @@ class SimpleEdgeExtractor(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+def edge_consistency_loss(pred, target, sobel):
+    pred_gray = KC.rgb_to_grayscale(pred)
+    target_gray = KC.rgb_to_grayscale(target)
+    pred_edges = torch.norm(sobel(pred_gray), dim=1, keepdim=True)
+    target_edges = torch.norm(sobel(target_gray), dim=1, keepdim=True)
+    return F.l1_loss(pred_edges, target_edges)
+
+
 
 # 디바이스 설정
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -333,8 +341,13 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
             with torch.amp.autocast(device_type='cuda'):
                 residual = model(lo_bc, cs, struct_map)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-
-                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5* lpips_loss(out, eh).mean()
+            
+                # ✅ Sobel 기반 경계 손실 계산
+                target_gray = KC.rgb_to_grayscale(eh)
+                target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
+                edge_loss = F.l1_loss(sobel_map, target_sobel)
+            
+                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 3.0 * edge_loss
                 loss_local = 90 * ((out - eh) ** 2 * mask).mean()
                 loss = loss_global + loss_local
 
