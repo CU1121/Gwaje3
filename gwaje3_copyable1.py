@@ -17,6 +17,8 @@ from kornia.filters import Sobel  # Sobel 필터 추가
 # ====================================================
 IMG_H = 400  # height
 IMG_W = 600  # width
+torch.cuda.empty_cache()      # 미사용 캐시 블록을 즉시 해제
+torch.cuda.ipc_collect() 
 
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3, out_ch=8):
