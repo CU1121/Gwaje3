@@ -182,7 +182,8 @@ class ConditionalLowLightDataset(Dataset):
         with torch.no_grad():
             learned_map = structure_model(low_t_for_struct)
         local_t = torch.cat([sobel_map, learned_map], dim=1).squeeze(0).to(device)  # (9,H,W)
-        return low_t, enh_t, cond, local_t
+        return low_t, enh_t, cond, m_t, local_t
+
 
 # ====================================================
 # 3. 모델 정의: U-Net + SE-Attention + 고주파 경계 연산
@@ -343,7 +344,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
     for epoch in range(epochs):
         model.train()
         total_loss = 0
-        for lo, eh, cond, mask in tqdm(train_loader, desc=f"[Epoch {epoch+1}]"):
+        for lo, eh, cond, mask, local_input in tqdm(train_loader, desc=f"[Epoch {epoch+1}]"):
             lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
             b  = cond[:, :1]
             cs = cond[:, 1:]
@@ -357,12 +358,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
 
 
             optimizer.zero_grad()
-            gray = KC.rgb_to_grayscale(lo_bc)
-            sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
-            learned_map = structure_model(lo_bc)
-            struct_map = torch.cat([sobel_map, learned_map], dim=1)
 
-            local_input = struct_map
             with torch.amp.autocast(device_type='cuda'):
                 residual = model(lo_bc, cond, local_input)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
@@ -390,7 +386,7 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
         val_loss, psnr_eval = 0, 0
         global_loss, local_loss = 0, 0
         with torch.no_grad():
-            for lo, eh, cond, mask in val_loader:
+            for lo, eh, cond, mask, local_input  in val_loader:
                 lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
                 b = cond[:, :1]
                 cs = cond[:, 1:]
@@ -401,11 +397,6 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
                 lo_b = KC.hsv_to_rgb(lo_hsv)
                 lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask_1ch, 0.0, 1.0)
 
-                gray = KC.rgb_to_grayscale(lo_bc)
-                sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
-                learned_map = structure_model(lo_bc)
-                cond = torch.cat([b, cs], dim=1)  # cond: (B, 4)
-                local_input = torch.cat([sobel_map, learned_map], dim=1)  # (B,3,H,W)
                 residual = model(lo_bc, cond, local_input)
 
                 residual = model(lo_bc, cond, local_input)
