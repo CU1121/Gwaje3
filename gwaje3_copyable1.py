@@ -18,17 +18,6 @@ from kornia.filters import Sobel  # Sobel 필터 추가
 IMG_H = 400  # height
 IMG_W = 600  # width
 
-def structure_weighted_l1_loss(output, target, structure_map, alpha=1.0, beta=0.1):
-    """
-    구조 map 기반 가중치 적용된 L1 손실
-    alpha: 구조가 있는 영역의 가중치
-    beta : 평탄한 영역의 가중치
-    """
-    with torch.no_grad():
-        weights = alpha * structure_map + beta * (1.0 - structure_map)
-    return F.l1_loss(output * weights, target * weights)
-
-
 class SimpleEdgeExtractor(nn.Module):
     def __init__(self, in_ch=3):
         super().__init__()
@@ -38,6 +27,14 @@ class SimpleEdgeExtractor(nn.Module):
         )
     def forward(self, x):
         return self.net(x)
+
+def edge_consistency_loss(pred, target, sobel):
+    pred_gray = KC.rgb_to_grayscale(pred)
+    target_gray = KC.rgb_to_grayscale(target)
+    pred_edges = torch.norm(sobel(pred_gray), dim=1, keepdim=True)
+    target_edges = torch.norm(sobel(target_gray), dim=1, keepdim=True)
+    return F.l1_loss(pred_edges, target_edges)
+
 
 
 # 디바이스 설정
@@ -144,8 +141,11 @@ class ConditionalLowLightDataset(Dataset):
         base = enh.split('_')[0] + '.jpg'
         low_path = os.path.join(self.low_dir, base)
         enh_path = os.path.join(self.enh_dir, enh)
+        mask_path = os.path.join(self.enh_dir, f"mask_{enh}")
+
         low = cv2.imread(low_path)
         enh_img = cv2.imread(enh_path)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if low is None or enh_img is None:
             raise FileNotFoundError(f"로딩 실패: {low_path} 또는 {enh_path}")
 
@@ -160,15 +160,23 @@ class ConditionalLowLightDataset(Dataset):
         if self.augment:
             low_t = self.aug(low_t)
 
-        # 현재는 글로벌 입력이므로 mask는 all-one
-        m_t = torch.ones((1, IMG_H, IMG_W), dtype=torch.float32).to(device)
+        if mask is None:
+            m = np.ones((IMG_H, IMG_W), dtype=np.float32)
+        else:
+            try:
+                m = cv2.resize(mask, (IMG_W, IMG_H)).astype(np.float32) / 255.0
+            except cv2.error:
+                m = np.ones((IMG_H, IMG_W), dtype=np.float32)
+        m_t = torch.tensor(m, dtype=torch.float32).unsqueeze(0).to(device)
 
         md = self.meta[enh]
         brightness = md['brightness'] / 255.0
         color_shifts = [c / 255.0 for c in md['color_shift']]
         cond = torch.tensor([brightness] + color_shifts, dtype=torch.float32).to(device)
 
-        return low_t, enh_t, cond, m_t
+        local_map = np.stack([m]*3, axis=0)  # (3, H, W)
+        local_t = torch.tensor(local_map, dtype=torch.float32).to(device)
+        return low_t, enh_t, cond, local_t
 
 # ====================================================
 # 3. 모델 정의: U-Net + SE-Attention + 고주파 경계 연산
@@ -183,43 +191,73 @@ class SEBlock(nn.Module):
         )
     def forward(self, x):
         return x * self.net(x)
+class GlobalInputModule(nn.Module):
+    def __init__(self, cond_dim=3, out_dim=256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(cond_dim, 512), nn.ReLU(),
+            nn.Linear(512, out_dim)
+        )
+    def forward(self, cond):
+        return self.mlp(cond).unsqueeze(2).unsqueeze(3)
+
+class LocalInputModule(nn.Module):
+    def __init__(self, in_ch=3, out_ch=256):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.ReLU()
+        )
+    def forward(self, x):
+        return self.conv(x)
+
 
 
 class UNetConditionalModel(nn.Module):
-    def __init__(self, cond_dim=3, img_h: int = IMG_H, img_w: int = IMG_W):
+    def __init__(self, cond_dim=4, img_h: int = IMG_H, img_w: int = IMG_W):
         super().__init__()
+        img_ch = 3
+        local_ch = 3
+
         self.img_h = img_h
         self.img_w = img_w
-        self.cond_fc = nn.Linear(cond_dim, img_h * img_w)
         def block(in_c, out_c):
             return nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.ReLU(),
                 nn.Conv2d(out_c, out_c, 3, padding=1), nn.ReLU(),
                 SEBlock(out_c)
             )
-        self.enc1 = block(4,64)
-        self.enc2 = block(64,128)
+
+        self.global_mlp = GlobalInputModule(cond_dim=cond_dim, out_dim=256)
+        self.local_cnn = LocalInputModule(in_ch=local_ch, out_ch=256)
+
+        self.enc1 = block(img_ch, 64)
+        self.enc2 = block(64, 128)
         self.pool = nn.MaxPool2d(2)
-        self.bott = block(128,256)
+        self.bott = block(128, 256)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.dec2 = block(256+128+2,128)
-        self.dec1 = block(128+64+2,64)
-        self.final = nn.Conv2d(64,3,1)
+        self.dec2 = block(256 + 128, 128)
+        self.dec1 = block(128 + 64, 64)
+        self.final = nn.Conv2d(64, 3, 1)
 
 
-    def forward(self, x, cond, struct_map):
-        b = x.size(0)
-        cm = self.cond_fc(cond).view(b,1,self.img_h,self.img_w)
-        x = torch.cat([x, cm], dim=1)
+    def forward(self, x, cond, local_input):
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
-        bn = self.bott(self.pool(e2))
-
-        s_down1 = F.interpolate(struct_map, scale_factor=0.5, mode='bilinear', align_corners=False)
-        s_down2 = struct_map
-
-        d2 = self.dec2(torch.cat([self.up(bn), e2, s_down1], dim=1))
-        d1 = self.dec1(torch.cat([self.up(d2), e1, s_down2], dim=1))
+    
+        # Global MLP
+        g_feat = self.global_mlp(cond)           # (B,256,1,1)
+        g_feat = g_feat.expand(-1, -1, e2.shape[2], e2.shape[3])  # expand to match spatial size
+    
+        # Local CNN
+        l_feat = self.local_cnn(local_input)     # (B,256,H/4,W/4)
+    
+        # Bottleneck
+        bn_input = self.pool(e2) + g_feat + l_feat
+        bn = self.bott(bn_input)
+    
+        # Decoder
+        d2 = self.dec2(torch.cat([self.up(bn), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up(d2), e1], dim=1))
         return self.final(d1)
 
 
@@ -228,26 +266,7 @@ def laplacian(x):
     kernel = kernel.view(1,1,3,3).repeat(x.size(1),1,1,1)
     return F.conv2d(x, kernel, padding=1, groups=x.size(1))
 
-# ====================================================
-# 4. Perceptual Loss
-# ====================================================
-class VGGPerceptualLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        weights = models.VGG16_Weights.IMAGENET1K_V1
-        try:
-            vgg = models.vgg16(weights=weights).features[:9].eval()
-        except RuntimeError:
-            cache = torch.hub.get_dir()
-            ckpt = weights.url.split('/')[-1]
-            path = os.path.join(cache,'checkpoints',ckpt)
-            if os.path.exists(path): os.remove(path)
-            vgg = models.vgg16(weights=weights).features[:9].eval()
-        for p in vgg.parameters(): p.requires_grad=False
-        self.vgg = vgg.to(device)
-        self.crit = nn.MSELoss()
-    def forward(self, x, y):
-        return self.crit(self.vgg(x), self.vgg(y))
+
 
 # ====================================================
 # 5. 저장 유틸
@@ -268,134 +287,158 @@ def safe_save(model, path):
 # 6. 학습 루프 (MSE + Perceptual + LPIPS Loss 추가)
 # ====================================================
 
-def train(low_dir, enh_dir, meta_file, epochs=1000, bs=10, lr=2e-2):
-    transform = T.Compose([T.ToPILImage(), T.Resize((IMG_H, IMG_W)), T.ToTensor()])
-    ds = ConditionalLowLightDataset(low_dir, enh_dir, meta_file, transform, augment=True)
-    n_val = int(0.2 * len(ds))
-    n_tr = len(ds) - n_val
-    tr_ds, va_ds = random_split(ds, [n_tr, n_val])
-    tr = DataLoader(tr_ds, bs, shuffle=True)
-    va = DataLoader(va_ds, bs)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import lpips
+import kornia.color as KC
+from kornia.filters import Sobel
+from tqdm import tqdm
+from torchvision import models
 
-    model = UNetConditionalModel(img_h=IMG_H, img_w=IMG_W).to(device)
-    structure_model = SimpleEdgeExtractor().to(device)
-    sobel = Sobel().to(device)
+# PSNR 계산 함수
+def psnr(x: torch.Tensor, y: torch.Tensor, max_val: float = 1.0):
+    mse = F.mse_loss(x, y, reduction='none')
+    mse = mse.flatten(start_dim=1).mean(dim=1)
+    psnr = 10 * torch.log10(max_val**2 / (mse + 1e-8))
+    return psnr.mean().item()
 
-    opt = optim.Adam(model.parameters(), lr)
-    scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
-    sched = optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, steps_per_epoch=len(tr), epochs=epochs)
-    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=6)
+# VGG 기반 Perceptual Loss
+class VGGPerceptualLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        weights = models.VGG16_Weights.IMAGENET1K_V1
+        vgg = models.vgg16(weights=weights).features[:9].eval()
+        for p in vgg.parameters():
+            p.requires_grad = False
+        self.vgg = vgg
+        self.crit = nn.MSELoss()
 
-    perc = VGGPerceptualLoss()
+    def forward(self, x, y):
+        return self.crit(self.vgg(x), self.vgg(y))
+
+# 혼합 손실 기반 학습 루프
+def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
+                           optimizer, epochs, device,
+                           save_path="best.pth", save_final="final.pth"):
     mse = nn.MSELoss()
     lpips_loss = lpips.LPIPS(net='vgg').to(device)
+    perc = VGGPerceptualLoss().to(device)
+    sobel = Sobel().to(device)
 
-    best = float('inf')
-    pat = 0
+    best_val_loss = float('inf')
+    patience = 0
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+    scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
-    for e in range(epochs):
+    for epoch in range(epochs):
         model.train()
         total_loss = 0
-        for lo, eh, cond, msk in tr:
-            b = cond[:, :1]
+        for lo, eh, cond, mask in tqdm(train_loader, desc=f"[Epoch {epoch+1}]"):
+            lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
+            b  = cond[:, :1]
             cs = cond[:, 1:]
-            lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
 
+            # Global 조정 (mask 제한 적용)
             lo_hsv = KC.rgb_to_hsv(lo)
-            lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1), 0.0, 1.0)
+            lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask, 0.0, 1.0)
             lo_b = KC.hsv_to_rgb(lo_hsv)
-            lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1), 0.0, 1.0)
+            lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask, 0.0, 1.0)
 
-            opt.zero_grad()
-
+            optimizer.zero_grad()
             gray = KC.rgb_to_grayscale(lo_bc)
             sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
             learned_map = structure_model(lo_bc)
             struct_map = torch.cat([sobel_map, learned_map], dim=1)
-            structure_strength = struct_map.norm(dim=1, keepdim=True)  # shape: (B, 1, H, W)
-            structure_strength = structure_strength / (structure_strength.max() + 1e-8)
 
-            if torch.cuda.is_available():
-                with torch.amp.autocast(device_type='cuda'):
-                    residual = model(lo_bc, cs, struct_map)
-                    out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                    l_mse = structure_weighted_l1_loss(out, eh, structure_strength)
-                    l_per = perc(out, eh)
-                    l_lpips = lpips_loss(out, eh).mean()
-                    loss = l_mse*28 + l_per + l_lpips
-                scaler.scale(loss).backward()
-                scaler.step(opt)
-                scaler.update()
-            else:
-                residual = model(lo_bc, cs, struct_map)
+            with torch.amp.autocast(device_type='cuda'):
+                local_input = torch.stack([mask[:, 0, :, :]] * 3, dim=1)  # (B,3,H,W)
+                residual = model(lo_bc, cond, local_input)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                l_mse = mse(out, eh)
-                l_per = perc(out, eh)
-                l_lpips = lpips_loss(out, eh).mean()
-                loss = l_mse*28 + l_per + l_lpips
-                loss.backward()
-                opt.step()
+            
+                # ✅ Sobel 기반 경계 손실 계산
+                target_gray = KC.rgb_to_grayscale(eh)
+                target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
+                edge_loss = F.l1_loss(sobel_map, target_sobel)
+            
+                loss_global = 30 * mse(out, eh) + 1.5 * perc(out, eh) + 1.5 * lpips_loss(out, eh).mean() + 3.0 * edge_loss
+                loss_local = 90 * ((out - eh) ** 2 * mask).mean()
+                loss = loss_global + loss_local
 
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             total_loss += loss.item()
 
+        # 검증
         model.eval()
-        val_loss = mse_loss = per_loss = lpips_eval = psnr_eval = 0
-
+        mse_loss, perc_loss, lp_loss = 0, 0, 0
+        val_loss, psnr_eval = 0, 0
+        global_loss, local_loss = 0, 0
         with torch.no_grad():
-            for lo, eh, cond, msk in va:
-                lo, eh, cond, msk = lo.to(device), eh.to(device), cond.to(device), msk.to(device)
+            for lo, eh, cond, mask in val_loader:
+                lo, eh, cond, mask = lo.to(device), eh.to(device), cond.to(device), mask.to(device)
                 b = cond[:, :1]
                 cs = cond[:, 1:]
 
                 lo_hsv = KC.rgb_to_hsv(lo)
-                lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * msk, 0.0, 1.0)
+                lo_hsv[:, 2:3, :, :] = torch.clamp(lo_hsv[:, 2:3, :, :] + b.view(-1, 1, 1, 1) * mask, 0.0, 1.0)
                 lo_b = KC.hsv_to_rgb(lo_hsv)
-                lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * msk, 0.0, 1.0)
+                lo_bc = torch.clamp(lo_b + cs.view(-1, 3, 1, 1) * mask, 0.0, 1.0)
 
                 gray = KC.rgb_to_grayscale(lo_bc)
                 sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
                 learned_map = structure_model(lo_bc)
-                struct_map = torch.cat([sobel_map, learned_map], dim=1)
+                cond = torch.cat([b, cs], dim=1)  # cond: (B, 4)
+                local_input = mask.repeat(1, 3, 1, 1)  # (B,3,H,W)
+                residual = model(lo_bc, cond, local_input)
 
-                residual = model(lo_bc, cs, struct_map)
+                residual = model(lo_bc, cond, local_input)
+
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-                structure_strength = struct_map.norm(dim=1, keepdim=True)
-                structure_strength = structure_strength / (structure_strength.max() + 1e-8)
-                l_mse = structure_weighted_l1_loss(out, eh, structure_strength)
-                l_per = perc(out, eh)
-                l_lpips = lpips_loss(out, eh).mean()
 
-                val_loss += (l_mse*28 + l_per + l_lpips).item()
-                mse_loss += l_mse.item()
-                per_loss += l_per.item()
-                lpips_eval += l_lpips.item()
+                m = mse(out,eh)
+                p = perc(out,eh)
+                l = lpips_loss(out,eh).mean()
+
+                loss_global = 30 * m + 1.5 * p + 1.5 * l
+                mse_loss += m
+                perc_loss += p
+                lp_loss += l
+                
+                loss_local = 90 * ((out - eh) ** 2 * mask).mean()
+                loss = loss_global + loss_local
+                global_loss += loss_global
+                local_loss += loss_local
+
+                val_loss += loss.item()
                 psnr_eval += psnr(out, eh)
 
-        val_loss /= len(va)
-        mse_loss /= len(va)
-        per_loss /= len(va)
-        lpips_eval /= len(va)
-        psnr_eval /= len(va)
-        print(f"Ep {e+1}/{epochs} Train:{total_loss/len(tr):.4f} Val:{val_loss:.4f}")
-        print(f"mse:{mse_loss:.4f} perc:{per_loss:.4f} lpips:{lpips_eval:.4f}")
-        print(f"psnr : {psnr_eval:.2f}dB")
+        val_loss /= len(val_loader)
+        psnr_eval /= len(val_loader)
+        mse_loss /= len(val_loader)
+        perc_loss /= len(val_loader)
+        lp_loss /= len(val_loader)
+        global_loss /= len(val_loader)
+        local_loss /= len(val_loader)
+        print(f"[Epoch {epoch+1}] Loss: {total_loss/len(train_loader):.4f} | Val: {val_loss:.4f} | PSNR: {psnr_eval:.2f}dB")
+        print(f" mse : {mse_loss}, perc : {perc_loss}, lp : {lp_loss}, global : {global_loss}, local : {local_loss}")
 
         lr_scheduler.step(val_loss)
-        if val_loss < best:
-            safe_save(model, 'best.pth')
-            best = val_loss
-            pat = 0
-        else:
-            pat += 1
-        if pat == 5:
-            lr/=2
-        if pat == 10:
-            lr/=2
-        if pat > 15:
-            print('Early stopping triggered')
-            break
 
-    safe_save(model, 'final.pth')
+        if val_loss < best_val_loss:
+            torch.save(model.state_dict(), save_path)
+            best_val_loss = val_loss
+            patience = 0
+            print(f"✅ Saved best model to {save_path}")
+        else:
+            patience += 1
+            if patience > 15:
+                print("🛑 Early stopping triggered.")
+                break
+
+    torch.save(model.state_dict(), save_final)
+    print(f" Final model saved to {save_final}")
 
 # ====================================================
 # 7. 추론
@@ -421,7 +464,17 @@ def inference(image_path, brightness, shifts):
     global temp_sel, mask_sel, draw_flag
 
     image = cv2.imread(image_path)
+    temp_sel = image.copy()
+    mask_sel = np.zeros(image.shape[:2], dtype=np.uint8)
+    draw_flag = False
 
+    cv2.namedWindow("영역 선택 (q: 완료)")
+    cv2.setMouseCallback("영역 선택 (q: 완료)", draw_sel)
+    while True:
+        cv2.imshow("영역 선택 (q: 완료)", temp_sel)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    cv2.destroyAllWindows()
 
     transform = T.Compose([
         T.ToPILImage(),
@@ -433,16 +486,19 @@ def inference(image_path, brightness, shifts):
     cond = [brightness/255.0] + [s/255.0 for s in shifts]
     condition_tensor = torch.tensor([cond], dtype=torch.float32).to(device)
 
+    mask_resized = cv2.resize(mask_sel, (input_tensor.shape[3], input_tensor.shape[2]))
+    mask_tensor = (torch.from_numpy(mask_resized.astype(np.float32) / 255.0)
+                   .unsqueeze(0).unsqueeze(0).to(device))
+
     b  = condition_tensor[:, :1]
     cs = condition_tensor[:, 1:]
 
     lo_hsv = KC.rgb_to_hsv(input_tensor)
-    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1), 0.0, 1.0)
+    lo_hsv[:,2:3,:,:] = torch.clamp(lo_hsv[:,2:3,:,:] + b.view(-1,1,1,1) * mask_tensor, 0.0, 1.0)
     lo_b = KC.hsv_to_rgb(lo_hsv)
-    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1), 0.0, 1.0)
+    lo_bc = torch.clamp(lo_b + cs.view(-1,3,1,1) * mask_tensor, 0.0, 1.0)
 
-
-    model = UNetConditionalModel(cond_dim=3, img_h=IMG_H, img_w=IMG_W).to(device)
+    model = UNetConditionalModel(cond_dim=4, img_h=IMG_H, img_w=IMG_W).to(device)
     structure_model = SimpleEdgeExtractor().to(device)
     sobel = Sobel().to(device)
 
@@ -452,19 +508,19 @@ def inference(image_path, brightness, shifts):
     sobel.eval()
 
     with torch.no_grad():
-        gray = KC.rgb_to_grayscale(lo_bc)
-        sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
-        learned_map = structure_model(lo_bc)
-        struct_map = torch.cat([sobel_map, learned_map], dim=1)
+        local_input_tensor = mask_tensor.repeat(1, 3, 1, 1)  # shape: (1,3,H,W)
 
-        residual   = model(lo_bc, cs, struct_map)
+        
+        residual = model(lo_bc, condition_tensor, local_input_tensor)
         out_tensor = torch.clamp(lo_bc + residual, 0.0, 1.0)[0]
 
     output_img = (out_tensor.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8)
     output_bgr = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
+    mask_full  = cv2.resize(mask_sel, (image.shape[1], image.shape[0]))
+    mask_3ch   = np.stack([mask_full]*3, axis=2)
+    result     = np.where(mask_3ch==255, output_bgr, image)
 
-    cv2.imshow("AI 보정 결과", output_bgr)
-
+    cv2.imshow("AI 보정 결과", result)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
@@ -475,7 +531,20 @@ if __name__ == "__main__":
         low = input("원본 폴더: ")
         enh = input("보정 폴더: ")
         analyze_and_generate_metadata(low, enh)
-        train(low, enh, os.path.join(enh, "metadata.json"))
+        transform = T.Compose([T.ToPILImage(), T.Resize((IMG_H, IMG_W)), T.ToTensor()])
+        ds = ConditionalLowLightDataset(low, enh, os.path.join(enh, "metadata.json"), transform, augment=True)
+        n_val = int(0.2 * len(ds))
+        n_tr = len(ds) - n_val
+        tr_ds, va_ds = random_split(ds, [n_tr, n_val])
+        train_loader = DataLoader(tr_ds, batch_size=10, shuffle=True)
+        val_loader = DataLoader(va_ds, batch_size=10)
+        
+        model = UNetConditionalModel(cond_dim=4).to(device)
+        structure_model = SimpleEdgeExtractor().to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        
+        train_with_hybrid_loss(model, structure_model, train_loader, val_loader, optimizer, epochs=1000, device=device)
+
     elif mode == "infer":
         path = input("이미지 경로: ")
         b = float(input("밝기 조정값: "))
