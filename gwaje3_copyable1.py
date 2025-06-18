@@ -362,7 +362,8 @@ def train_with_hybrid_loss(model, structure_model, train_loader, val_loader,
             with torch.amp.autocast(device_type='cuda'):
                 residual = model(lo_bc, cond, local_input)
                 out = torch.clamp(lo_bc + residual, 0.0, 1.0)
-            
+                gray = KC.rgb_to_grayscale(out)
+                sobel_map = torch.norm(sobel(gray), dim=1, keepdim=True)
                 #  Sobel 기반 경계 손실 계산
                 target_gray = KC.rgb_to_grayscale(eh)
                 target_sobel = torch.norm(sobel(target_gray), dim=1, keepdim=True)
